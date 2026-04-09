@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.stocks.tradier_client import tradier_client
@@ -31,6 +31,32 @@ _TF_LOOKBACK_DAYS: dict[str, int] = {
     "15m": 10,   # ~260 bars across ~5 sessions
 }
 _DAILY_LOOKBACK_DAYS = 150   # well beyond the 55-bar max any strategy needs
+
+
+def _parse_et_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip().replace("Z", "+00:00")
+    for candidate in (text, text.replace(" ", "T", 1)):
+        try:
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_ET)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _drop_incomplete_timesales(candles: list[dict], interval_minutes: int) -> list[dict]:
+    if len(candles) < 2:
+        return candles
+    bar_time = _parse_et_timestamp(str(candles[-1].get("time", "")))
+    if bar_time is None:
+        return candles
+    if bar_time.timestamp() + interval_minutes * 60 > datetime.now(timezone.utc).timestamp():
+        return candles[:-1]
+    return candles
 
 
 def _ts_start(calendar_days: int) -> str:
@@ -125,4 +151,5 @@ class StockCandleFetcher:
             interval=ts_interval,
             start=_ts_start(_TF_LOOKBACK_DAYS[tf]),
         )
-        return _normalize_timesales(raw)
+        candles = _normalize_timesales(raw)
+        return _drop_incomplete_timesales(candles, TF_MINUTES[tf])

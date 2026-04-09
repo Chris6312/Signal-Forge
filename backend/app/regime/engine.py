@@ -101,7 +101,7 @@ class RegimeEngine:
         if "breakout" in strat and not policy.breakout_enabled:
             return False, "breakout strategy disabled in current regime"
 
-        if "mean_reversion" in strat and not policy.mean_reversion_enabled:
+        if ("mean reversion" in strat or "mean_reversion" in strat) and not policy.mean_reversion_enabled:
             return False, "mean reversion disabled in current regime"
 
         return True, "ok"

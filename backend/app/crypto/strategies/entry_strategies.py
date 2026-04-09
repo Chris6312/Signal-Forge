@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def _atr(ohlcv, period=14):
     trs = []
     for i in range(1, len(ohlcv)):
         high = float(ohlcv[i][2])
-        low  = float(ohlcv[i][3])
+        low = float(ohlcv[i][3])
         prev_close = float(ohlcv[i - 1][4])
         trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
     return sum(trs[-period:]) / period
@@ -57,15 +58,36 @@ def _detect_regime(ohlcv):
     return "ranging"
 
 
+def _ema_value_at(ema_series, period, idx):
+    ema_idx = idx - (period - 1)
+    if ema_idx < 0 or ema_idx >= len(ema_series):
+        return None
+    return ema_series[ema_idx]
+
+
+# Crypto OHLC arrays are [ts, open, high, low, close, volume].
+def _closed_ohlcv(ohlcv, tf_minutes: int):
+    if len(ohlcv) < 2:
+        return ohlcv
+    try:
+        bar_open_ts = float(ohlcv[-1][0])
+    except (TypeError, ValueError, IndexError):
+        return ohlcv
+    if bar_open_ts + tf_minutes * 60 > datetime.now(timezone.utc).timestamp():
+        return ohlcv[:-1]
+    return ohlcv
+
+
 class MomentumBreakoutContinuation:
     name = "Momentum Breakout Continuation"
     primary_tf = "1H"
 
     def evaluate(self, symbol, ohlcv):
+        ohlcv = _closed_ohlcv(ohlcv, 60)
         if len(ohlcv) < 30:
             return None
         closes = [float(c[4]) for c in ohlcv]
-        highs  = [float(c[2]) for c in ohlcv]
+        highs = [float(c[2]) for c in ohlcv]
         current = closes[-1]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
@@ -77,17 +99,25 @@ class MomentumBreakoutContinuation:
         ema20 = _ema(closes, 20)
         if not ema20 or current < ema20[-1]:
             return None
-        stop = current - atr * 1.5
-        tp1  = current + atr * 2.0
-        tp2  = current + atr * 4.0
+        stop = recent_high - atr * 0.5
+        tp1 = current + atr * 2.0
+        tp2 = current + atr * 4.0
         return EntrySignal(
-            strategy=self.name, symbol=symbol, entry_price=current,
-            initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-            regime=regime, confidence=0.70, max_hold_hours=48,
-            notes=f"Breakout above {recent_high:.4f}",
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.70,
+            max_hold_hours=48,
+            notes=f"Breakout continuation above {recent_high:.4f}",
             reasoning={
-                "timeframe": self.primary_tf, "atr": round(atr, 6),
-                "ema20": round(ema20[-1], 6), "recent_high_20": round(recent_high, 6),
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
+                "ema20": round(ema20[-1], 6),
+                "recent_high_20": round(recent_high, 6),
                 "breakout_pct": round((current / recent_high - 1) * 100, 3),
                 "current_vs_ema20": round(current - ema20[-1], 6),
             },
@@ -99,35 +129,57 @@ class PullbackReclaim:
     primary_tf = "1H"
 
     def evaluate(self, symbol, ohlcv):
+        ohlcv = _closed_ohlcv(ohlcv, 60)
         if len(ohlcv) < 30:
             return None
         closes = [float(c[4]) for c in ohlcv]
-        lows   = [float(c[3]) for c in ohlcv]
+        highs = [float(c[2]) for c in ohlcv]
+        lows = [float(c[3]) for c in ohlcv]
         current = closes[-1]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
-        if regime not in ("trending_up",):
+        if regime != "trending_up":
             return None
         ema20 = _ema(closes, 20)
         if not ema20:
             return None
-        ema_val = ema20[-1]
-        prev_below = any(c < ema_val for c in closes[-6:-1])
-        if not (prev_below and current > ema_val):
+        current_ema = ema20[-1]
+        dipped_below = False
+        for idx in range(max(1, len(ohlcv) - 7), len(ohlcv) - 1):
+            ema_at_idx = _ema_value_at(ema20, 20, idx)
+            if ema_at_idx is None:
+                continue
+            if closes[idx] < ema_at_idx or lows[idx] < ema_at_idx:
+                dipped_below = True
+                break
+        if not dipped_below:
             return None
-        pullback_low = min(lows[-5:])
+        prior_high = highs[-2]
+        prior_close = closes[-2]
+        if current <= current_ema or current <= prior_high or current <= prior_close:
+            return None
+        pullback_low = min(lows[-6:-1])
         stop = pullback_low - atr * 0.3
-        tp1  = current + atr * 1.5
-        tp2  = current + atr * 3.0
+        tp1 = current + atr * 1.5
+        tp2 = current + atr * 3.0
         return EntrySignal(
-            strategy=self.name, symbol=symbol, entry_price=current,
-            initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-            regime=regime, confidence=0.65, max_hold_hours=36,
-            notes="Pullback reclaim of EMA20",
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.65,
+            max_hold_hours=36,
+            notes="Bullish pullback reclaimed EMA20 with confirmation close",
             reasoning={
-                "timeframe": self.primary_tf, "atr": round(atr, 6),
-                "ema20": round(ema_val, 6), "pullback_low_5": round(pullback_low, 6),
-                "current_vs_ema20": round(current - ema_val, 6),
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
+                "ema20": round(current_ema, 6),
+                "pullback_low_5": round(pullback_low, 6),
+                "current_vs_ema20": round(current - current_ema, 6),
+                "prior_high": round(prior_high, 6),
                 "dip_below_ema_confirmed": True,
             },
         )
@@ -138,10 +190,12 @@ class MeanReversionBounce:
     primary_tf = "1H"
 
     def evaluate(self, symbol, ohlcv):
-        if len(ohlcv) < 30:
+        ohlcv = _closed_ohlcv(ohlcv, 60)
+        if len(ohlcv) < 50:
             return None
         closes = [float(c[4]) for c in ohlcv]
         current = closes[-1]
+        prior_close = closes[-2]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
         if regime not in ("ranging", "unknown"):
@@ -150,26 +204,36 @@ class MeanReversionBounce:
         if not ema50:
             return None
         mean = ema50[-1]
-        pct_below = (mean - current) / mean
-        if pct_below < 0.03:
+        prior_pct_below = (mean - prior_close) / mean
+        current_pct_below = (mean - current) / mean
+        if prior_pct_below < 0.03:
             return None
-        if closes[-1] > closes[-2]:
-            stop = current - atr * 1.0
-            tp1  = mean
-            tp2  = mean + atr * 1.0
-            return EntrySignal(
-                strategy=self.name, symbol=symbol, entry_price=current,
-                initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-                regime=regime, confidence=0.60, max_hold_hours=24,
-                notes=f"{pct_below*100:.1f}% below mean, bouncing",
-                reasoning={
-                    "timeframe": self.primary_tf, "atr": round(atr, 6),
-                    "ema50_mean": round(mean, 6),
-                    "pct_below_mean": round(pct_below * 100, 3),
-                    "threshold_pct": 3.0, "bounce_confirmed": True,
-                },
-            )
-        return None
+        if not (current > prior_close and current < mean):
+            return None
+        stop = min(prior_close, current) - atr * 1.0
+        tp1 = mean
+        tp2 = mean + atr * 1.0
+        return EntrySignal(
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.60,
+            max_hold_hours=24,
+            notes=f"{prior_pct_below*100:.1f}% below mean, now bouncing",
+            reasoning={
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
+                "ema50_mean": round(mean, 6),
+                "prior_pct_below_mean": round(prior_pct_below * 100, 3),
+                "current_pct_below_mean": round(current_pct_below * 100, 3),
+                "threshold_pct": 3.0,
+                "bounce_confirmed": True,
+            },
+        )
 
 
 class RangeRotationReversal:
@@ -177,35 +241,47 @@ class RangeRotationReversal:
     primary_tf = "4H"
 
     def evaluate(self, symbol, ohlcv):
+        ohlcv = _closed_ohlcv(ohlcv, 240)
         if len(ohlcv) < 40:
             return None
         closes = [float(c[4]) for c in ohlcv]
-        lows   = [float(c[3]) for c in ohlcv]
+        highs = [float(c[2]) for c in ohlcv]
+        lows = [float(c[3]) for c in ohlcv]
         current = closes[-1]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
         if regime != "ranging":
             return None
-        range_low = min(lows[-30:])
+        range_low = min(lows[-30:-1])
+        range_high = max(highs[-30:-1])
         if current > range_low * 1.02:
             return None
-        if closes[-1] > closes[-2] > closes[-3]:
-            stop = range_low - atr * 0.5
-            tp1  = current + atr * 2.0
-            tp2  = current + atr * 3.5
-            return EntrySignal(
-                strategy=self.name, symbol=symbol, entry_price=current,
-                initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-                regime=regime, confidence=0.62, max_hold_hours=24,
-                notes=f"Range support reversal near {range_low:.4f}",
-                reasoning={
-                    "timeframe": self.primary_tf, "atr": round(atr, 6),
-                    "range_low_30": round(range_low, 6),
-                    "distance_from_low_pct": round((current / range_low - 1) * 100, 3),
-                    "threshold_pct": 2.0, "three_ascending_closes": True,
-                },
-            )
-        return None
+        if not (closes[-3] < closes[-2] < closes[-1]):
+            return None
+        stop = range_low - atr * 0.5
+        tp1 = min(range_high, current + atr * 2.0)
+        tp2 = current + atr * 3.5
+        return EntrySignal(
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.62,
+            max_hold_hours=24,
+            notes=f"Range support reversal near {range_low:.4f}",
+            reasoning={
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
+                "range_low_30": round(range_low, 6),
+                "range_high_30": round(range_high, 6),
+                "distance_from_low_pct": round((current / range_low - 1) * 100, 3),
+                "threshold_pct": 2.0,
+                "three_ascending_closes": True,
+            },
+        )
 
 
 class BreakoutRetestHold:
@@ -213,38 +289,47 @@ class BreakoutRetestHold:
     primary_tf = "4H"
 
     def evaluate(self, symbol, ohlcv):
+        ohlcv = _closed_ohlcv(ohlcv, 240)
         if len(ohlcv) < 40:
             return None
         closes = [float(c[4]) for c in ohlcv]
-        highs  = [float(c[2]) for c in ohlcv]
+        highs = [float(c[2]) for c in ohlcv]
+        lows = [float(c[3]) for c in ohlcv]
         current = closes[-1]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
-        prior_high  = max(highs[-40:-10])
-        recent_high = max(highs[-10:-1])
-        if recent_high <= prior_high:
+        prior_high = max(highs[-40:-10])
+        breakout_high = max(highs[-10:-1])
+        if breakout_high <= prior_high:
             return None
-        if not (prior_high * 0.995 <= current <= prior_high * 1.015):
+        retest_low = min(lows[-4:-1])
+        if retest_low > prior_high * 1.015 or retest_low < prior_high * 0.985:
             return None
-        if closes[-1] >= closes[-2]:
-            stop = prior_high - atr * 0.5
-            tp1  = current + atr * 2.0
-            tp2  = current + atr * 4.0
-            return EntrySignal(
-                strategy=self.name, symbol=symbol, entry_price=current,
-                initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-                regime=regime, confidence=0.68, max_hold_hours=36,
-                notes=f"Retest of breakout level {prior_high:.4f}",
-                reasoning={
-                    "timeframe": self.primary_tf, "atr": round(atr, 6),
-                    "prior_high_40": round(prior_high, 6),
-                    "recent_high_10": round(recent_high, 6),
-                    "retest_band_low": round(prior_high * 0.995, 6),
-                    "retest_band_high": round(prior_high * 1.015, 6),
-                    "price_in_retest_band": True,
-                },
-            )
-        return None
+        if current < prior_high or current < closes[-2]:
+            return None
+        stop = min(retest_low, prior_high) - atr * 0.5
+        tp1 = current + atr * 2.0
+        tp2 = current + atr * 4.0
+        return EntrySignal(
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.68,
+            max_hold_hours=36,
+            notes=f"Breakout level {prior_high:.4f} held on retest",
+            reasoning={
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
+                "prior_high_40": round(prior_high, 6),
+                "breakout_high_10": round(breakout_high, 6),
+                "retest_low": round(retest_low, 6),
+                "price_in_retest_band": True,
+            },
+        )
 
 
 class FailedBreakdownReclaim:
@@ -252,47 +337,48 @@ class FailedBreakdownReclaim:
     primary_tf = "1H"
 
     def evaluate(self, symbol, ohlcv):
+        ohlcv = _closed_ohlcv(ohlcv, 60)
         if len(ohlcv) < 20:
             return None
-        closes  = [float(c[4]) for c in ohlcv]
-        lows    = [float(c[3]) for c in ohlcv]
-        volumes = [float(c[5]) for c in ohlcv]
+        closes = [float(c[4]) for c in ohlcv]
+        lows = [float(c[3]) for c in ohlcv]
+        highs = [float(c[2]) for c in ohlcv]
         current = closes[-1]
         atr = _atr(ohlcv)
         regime = _detect_regime(ohlcv)
-        if regime != "trending_up":
+        support = min(lows[-20:-5])
+        recent_min = min(lows[-5:-1])
+        if recent_min >= support:
             return None
-        support    = min(lows[-20:-5])
-        recent_min = min(lows[-5:])
-        if recent_min >= support - atr * 0.5:
-            return None
-        if not (closes[-2] > support and closes[-1] > support):
-            return None
-        avg_volume = sum(volumes[-20:-1]) / max(len(volumes[-20:-1]), 1)
-        if avg_volume > 0 and volumes[-1] < avg_volume:
+        prior_close = closes[-2]
+        if not (prior_close <= support and current > support and current > highs[-2]):
             return None
         stop = recent_min - atr * 0.3
-        tp1  = current + atr * 2.0
-        tp2  = current + atr * 3.5
+        tp1 = current + atr * 2.0
+        tp2 = current + atr * 3.5
         return EntrySignal(
-            strategy=self.name, symbol=symbol, entry_price=current,
-            initial_stop=stop, profit_target_1=tp1, profit_target_2=tp2,
-            regime=regime, confidence=0.67, max_hold_hours=24,
-            notes=f"Failed breakdown below {support:.4f}, reclaimed with volume",
+            strategy=self.name,
+            symbol=symbol,
+            entry_price=current,
+            initial_stop=stop,
+            profit_target_1=tp1,
+            profit_target_2=tp2,
+            regime=regime,
+            confidence=0.67,
+            max_hold_hours=24,
+            notes=f"Failed breakdown below {support:.4f} reclaimed with close back above support",
             reasoning={
-                "timeframe": self.primary_tf, "atr": round(atr, 6),
+                "timeframe": self.primary_tf,
+                "atr": round(atr, 6),
                 "support_level": round(support, 6),
                 "breakdown_low": round(recent_min, 6),
-                "breakdown_depth_atr": round((support - recent_min) / atr, 3) if atr else None,
-                "two_closes_above_support": True,
-                "volume_candle": round(volumes[-1], 2),
-                "volume_avg_20": round(avg_volume, 2),
-                "volume_ratio": round(volumes[-1] / avg_volume, 3) if avg_volume else None,
+                "prior_close": round(prior_close, 6),
+                "reclaim_confirmed": True,
             },
         )
 
 
-CRYPTO_ENTRY_STRATEGIES = [
+ENTRY_STRATEGIES = [
     MomentumBreakoutContinuation(),
     PullbackReclaim(),
     MeanReversionBounce(),
@@ -302,21 +388,24 @@ CRYPTO_ENTRY_STRATEGIES = [
 ]
 
 
-def evaluate_all(symbol, candles):
-    if isinstance(candles, list):
-        candles_by_tf = {tf: candles for tf in ("15m", "1H", "4H", "daily")}
-    else:
-        candles_by_tf = candles
+def evaluate_all(symbol, candles_by_tf):
+    if isinstance(candles_by_tf, list):
+        candles_by_tf = {
+            "15m": candles_by_tf,
+            "1H": candles_by_tf,
+            "4H": candles_by_tf,
+            "daily": candles_by_tf,
+        }
     signals = []
-    for strategy in CRYPTO_ENTRY_STRATEGIES:
-        primary = candles_by_tf.get(strategy.primary_tf, [])
-        if len(primary) < 20:
+    for strat in ENTRY_STRATEGIES:
+        ohlcv = candles_by_tf.get(strat.primary_tf, [])
+        if len(ohlcv) < 20:
             continue
         try:
-            sig = strategy.evaluate(symbol, primary)
+            sig = strat.evaluate(symbol, ohlcv)
             if sig:
                 signals.append(sig)
-        except Exception as exc:
-            logger.error("Strategy %s error for %s: %s", strategy.name, symbol, exc)
+        except Exception as e:
+            logger.error("Strategy %s failed for %s: %s", strat.name, symbol, e)
     signals.sort(key=lambda s: s.confidence, reverse=True)
     return signals

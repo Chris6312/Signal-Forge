@@ -10,11 +10,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from app.crypto.kraken_client import kraken_client
 from app.common.candle_store import CandleStore, TF_MINUTES
 
 logger = logging.getLogger(__name__)
+
+def _drop_incomplete_ohlcv(candles: list[list], interval_minutes: int) -> list[list]:
+    if len(candles) < 2:
+        return candles
+    try:
+        bar_open_ts = float(candles[-1][0])
+    except (TypeError, ValueError, IndexError):
+        return candles
+    if bar_open_ts + interval_minutes * 60 > datetime.now(timezone.utc).timestamp():
+        return candles[:-1]
+    return candles
 
 
 class CryptoCandleFetcher:
@@ -31,9 +43,11 @@ class CryptoCandleFetcher:
         """Fetch all timeframes for this symbol.  Called once per symbol at startup."""
         for tf in self.TIMEFRAMES:
             try:
-                candles = await kraken_client.get_ohlcv(symbol, interval=TF_MINUTES[tf])
+                interval = TF_MINUTES[tf]
+                candles = await kraken_client.get_ohlcv(symbol, interval=interval)
+                candles = _drop_incomplete_ohlcv(candles, interval)
                 if candles:
-                    await self.store.update(symbol, TF_MINUTES[tf], candles)
+                    await self.store.update(symbol, interval, candles)
                     logger.info("Backfill %s @%s: %d bars", symbol, tf, len(candles))
                 await asyncio.sleep(self._RATE_PAUSE)
             except Exception as exc:
@@ -48,6 +62,7 @@ class CryptoCandleFetcher:
                 continue
             try:
                 candles = await kraken_client.get_ohlcv(symbol, interval=iv)
+                candles = _drop_incomplete_ohlcv(candles, iv)
                 if candles:
                     await self.store.update(symbol, iv, candles)
                     refreshed.append(tf)
