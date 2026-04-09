@@ -8,37 +8,46 @@
   }
 
   body {
-    @apply bg-surface text-gray-100 font-sans antialiased;
-    font-family: 'Inter', sans-serif;
+    @apply bg-surface text-gray-100 font-sans antialiased selection:bg-brand selection:text-white;
   }
 
+  /* Sleeker, darker scrollbars for a terminal feel */
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 4px;
+    height: 4px;
   }
   ::-webkit-scrollbar-track {
     @apply bg-surface;
   }
   ::-webkit-scrollbar-thumb {
-    @apply bg-surface-border rounded-full;
+    @apply bg-surface-border rounded-full hover:bg-gray-600 transition-colors;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-surface-card border border-surface-border rounded-xl p-5;
+    @apply bg-surface-card border border-surface-border rounded-xl p-5 shadow-card-inset relative overflow-hidden transition-all duration-300;
+  }
+
+  .card::before {
+    content: '';
+    @apply absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-brand/30 to-transparent opacity-0 transition-opacity duration-300;
+  }
+
+  .card:hover::before {
+    @apply opacity-100;
   }
 
   .btn-primary {
-    @apply bg-brand hover:bg-brand-dark text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors;
+    @apply bg-brand hover:bg-brand-dark text-white px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-brand-glow hover:shadow-none;
   }
 
   .btn-ghost {
-    @apply text-gray-400 hover:text-white hover:bg-surface-hover px-3 py-2 rounded-lg text-sm transition-colors;
+    @apply text-gray-400 hover:text-white hover:bg-surface-hover px-3 py-2 rounded-lg text-sm transition-colors border border-transparent hover:border-surface-border;
   }
 
   .badge {
-    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider border;
   }
 
   .table-row-hover {
@@ -48,4 +57,18 @@
   .mono {
     font-family: 'JetBrains Mono', monospace;
   }
+
+  /* Command Palette Custom Item Styling */
+  .cmd-item {
+    @apply flex items-center gap-3 px-3 py-2.5 mt-1 text-sm text-gray-300 hover:bg-brand/10 hover:text-brand cursor-pointer rounded-lg aria-selected:bg-brand/10 aria-selected:text-brand aria-selected:border-l-2 aria-selected:border-brand border-l-2 border-transparent transition-all;
+  }
+}
+
+/* CMDK Specific Overrides */
+[cmdk-overlay] {
+  @apply fixed inset-0 bg-black/60 backdrop-blur-sm z-[150] animate-in fade-in duration-200;
+}
+
+[cmdk-group-heading] {
+  @apply select-none;
 }
