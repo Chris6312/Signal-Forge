@@ -74,18 +74,20 @@ class FixedRiskDynamicFloor:
                 new_stop=new_stop,
             )
 
-        if tp1_hit and (trailing_stop := milestone.get("trailing_stop")):
-            trail = float(trailing_stop)
-            if _stop_confirmed(current_price, trail, ohlcv):
-                return ExitDecision(True, f"Trailing floor hit at {trail:.4f}")
-            if trending and atr:
-                updated_trail = max(trail, current_price - atr * 1.5)
-                if updated_trail > trail:
-                    return ExitDecision(
-                        False, "Trailing floor raised",
-                        new_stop=updated_trail,
-                        trailing_active=True,
-                    )
+        if tp1_hit:
+            trailing_stop = milestone.get("trailing_stop")
+            if trailing_stop:
+                trail = float(trailing_stop)
+                if _stop_confirmed(current_price, trail, ohlcv):
+                    return ExitDecision(True, f"Trailing floor hit at {trail:.4f}")
+                if trending and atr:
+                    updated_trail = max(trail, current_price - atr * 1.5)
+                    if updated_trail > trail:
+                        return ExitDecision(
+                            False, "Trailing floor raised",
+                            new_stop=updated_trail,
+                            trailing_active=True,
+                        )
 
         return ExitDecision(False, "Holding")
 
