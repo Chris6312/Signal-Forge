@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://signalforge.local/schemas/watchlist_decision.schema.json",
+  "title": "WatchlistDecision",
+  "description": "AI-generated watchlist update payload consumed by the Signal Forge Discord listener. Post this as raw JSON or as a .json file attachment to the configured trading channel.",
+  "type": "object",
+  "required": ["timestamp", "source", "symbols"],
+  "additionalProperties": false,
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC datetime when the AI generated this decision (e.g. 2024-01-15T14:30:00Z). The listener rejects payloads older than DISCORD_DECISION_MAX_AGE_SECONDS (default 900s)."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["claude", "chatgpt", "manual"],
+      "description": "Identifier for the agent or method that produced this decision."
+    },
+    "symbols": {
+      "type": "array",
+      "description": "The complete replacement watchlist. Every symbol present becomes ACTIVE; any previously ACTIVE symbol not listed is moved to INACTIVE (or MANAGED if it has an open position).",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/SymbolEntry"
+      }
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional free-text narrative from the AI explaining the overall screening session."
+    }
+  },
+  "$defs": {
+    "SymbolEntry": {
+      "type": "object",
+      "required": ["symbol", "asset_class"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "pattern": "^[A-Z0-9/\\-\\.]+$",
+          "description": "Uppercase ticker symbol. Stocks: 'AAPL'. Crypto: 'BTC/USD'."
+        },
+        "asset_class": {
+          "type": "string",
+          "enum": ["stock", "crypto"],
+          "description": "Asset class. Must match the monitor that will trade it."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Concise AI-generated rationale for including this symbol as a long candidate."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "AI confidence score for this selection (0.0 = weakest, 1.0 = strongest)."
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Signal tags explaining why this symbol was selected.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "news_sentiment",
+              "trending",
+              "gainer",
+              "volume_spike",
+              "breakout",
+              "analyst_upgrade",
+              "earnings_beat",
+              "sector_rotation",
+              "momentum",
+              "support_reclaim"
+            ]
+          }
+        },
+        "price_at_decision": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Last known market price at the moment this decision was generated."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "timestamp": "2024-01-15T14:30:00Z",
+      "source": "claude",
+      "symbols": [
+        {
+          "symbol": "NVDA",
+          "asset_class": "stock",
+          "reason": "Strong earnings beat + analyst upgrades; price breaking above 52-week high on elevated volume.",
+          "confidence": 0.88,
+          "tags": ["earnings_beat", "analyst_upgrade", "breakout", "volume_spike"],
+          "price_at_decision": 875.50
+        },
+        {
+          "symbol": "META",
+          "asset_class": "stock",
+          "reason": "Positive AI product news; trending in top gainers with sector rotation into mega-cap tech.",
+          "confidence": 0.74,
+          "tags": ["news_sentiment", "trending", "gainer", "sector_rotation"],
+          "price_at_decision": 512.30
+        }
+      ],
+      "notes": "Screening run at US market open. Only including symbols with confluence of at least two signals and confidence >= 0.70."
+    },
+    {
+      "timestamp": "2024-01-15T15:00:00Z",
+      "source": "chatgpt",
+      "symbols": [
+        {
+          "symbol": "BTC/USD",
+          "asset_class": "crypto",
+          "reason": "24h volume +340% vs average; price reclaiming $50k support after failed breakdown.",
+          "confidence": 0.82,
+          "tags": ["volume_spike", "support_reclaim", "momentum"],
+          "price_at_decision": 51200.00
+        },
+        {
+          "symbol": "SOL/USD",
+          "asset_class": "crypto",
+          "reason": "Top 24h gainer on Kraken; trending upward with increasing buy-side order book depth.",
+          "confidence": 0.71,
+          "tags": ["gainer", "trending", "volume_spike"],
+          "price_at_decision": 112.80
+        }
+      ],
+      "notes": "Crypto screening — long-only. Excluded any pair with negative 7-day momentum or declining volume."
+    }
+  ]
+}
