@@ -1,9 +1,18 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  useReactTable,
+  SortingState,
+} from '@tanstack/react-table'
 import { fetchTradeHistory, fetchTradeSummary } from '@/api/endpoints'
 import MetricCard from '@/components/MetricCard'
-import { RefreshCw, Download } from 'lucide-react'
+import { RefreshCw, Download, Clock, ArrowUpDown, Activity } from 'lucide-react'
 import { formatET, relativeTime } from '@/utils/time'
+import clsx from 'clsx'
 
 interface Trade {
   id: string
@@ -31,18 +40,22 @@ interface Summary {
   avg_pnl: number
 }
 
-function pnlColor(v: number | null) {
-  if (v == null) return 'text-gray-400'
-  return v > 0 ? 'text-emerald-400' : v < 0 ? 'text-red-400' : 'text-gray-400'
+const columnHelper = createColumnHelper<Trade>()
+
+function formatPnL(val: number | null) {
+  if (val === null) return '—'
+  const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(Math.abs(val))
+  return val >= 0 ? `+${formatted}` : `-${formatted}`
 }
 
 export default function TradeHistory() {
   const [filterClass, setFilterClass] = useState<string>('')
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'exit_time', desc: true }])
 
   const params: Record<string, string> = {}
   if (filterClass) params.asset_class = filterClass
 
-  const { data: trades = [], isLoading, refetch } = useQuery<Trade[]>({
+  const { data: trades = [], isLoading, refetch, isRefetching } = useQuery<Trade[]>({
     queryKey: ['trades', filterClass],
     queryFn: () => fetchTradeHistory(params),
     refetchInterval: 30000,
@@ -56,15 +69,15 @@ export default function TradeHistory() {
 
   const exportCSV = () => {
     const rows = [
-      ['Symbol', 'Class', 'Entry', 'Exit', 'Qty', 'Entry Time', 'Exit Time', 'PnL', 'Exit Reason', 'Strategy'],
+      ['Symbol', 'Class', 'Entry Price', 'Exit Price', 'Qty', 'Entry Time', 'Exit Time', 'PnL Realized', 'Exit Reason', 'Entry Strategy'],
       ...trades.map(t => [
         t.symbol,
         t.asset_class,
         t.entry_price ?? '',
         t.exit_price ?? '',
         t.quantity ?? '',
-        t.entry_time ?? '',
-        t.exit_time ?? '',
+        t.entry_time ? new Date(t.entry_time).toISOString() : '',
+        t.exit_time ? new Date(t.exit_time).toISOString() : '',
         t.pnl_realized ?? '',
         t.exit_reason ?? '',
         t.entry_strategy ?? '',
@@ -75,46 +88,128 @@ export default function TradeHistory() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'signal_forge_trades.csv'
+    a.download = `forge_executions_${filterClass || 'all'}_${new Date().getTime()}.csv`
     a.click()
   }
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Trade History</h1>
-          <p className="text-sm text-gray-500 mt-1">{trades.length} closed trades</p>
+  const columns = useMemo(() => [
+    columnHelper.accessor('symbol', {
+      header: 'VECTOR',
+      cell: info => (
+        <div className="flex items-center gap-2">
+          <div className={clsx(
+            "w-1.5 h-1.5 rounded-full shadow-[0_0_5px_currentColor]",
+            info.row.original.asset_class === 'crypto' ? 'text-[#5865F2] bg-[#5865F2]' : 'text-system-online bg-system-online'
+          )}></div>
+          <span className="font-bold tracking-wider text-white">{info.getValue()}</span>
         </div>
-        <div className="flex gap-3">
-          <button onClick={exportCSV} className="btn-ghost flex items-center gap-1.5">
+      )
+    }),
+    columnHelper.accessor('entry_price', {
+      header: 'ENTRY_Px',
+      cell: info => <span className="text-gray-400 font-mono">{info.getValue()?.toFixed(4) ?? '—'}</span>
+    }),
+    columnHelper.accessor('exit_price', {
+      header: 'EXIT_Px',
+      cell: info => <span className="text-gray-300 font-mono">{info.getValue()?.toFixed(4) ?? '—'}</span>
+    }),
+    columnHelper.accessor('pnl_realized', {
+      header: 'REALIZED_DELTA',
+      cell: info => {
+        const val = info.getValue()
+        return (
+          <span className={clsx(
+            "font-mono font-bold tracking-tight",
+            val !== null && val > 0 ? "text-system-online drop-shadow-[0_0_8px_rgba(16,185,129,0.3)]" : 
+            val !== null && val < 0 ? "text-system-offline drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]" : "text-gray-500"
+          )}>
+            {formatPnL(val)}
+          </span>
+        )
+      }
+    }),
+    columnHelper.accessor('exit_reason', {
+      header: 'TRIGGER',
+      cell: info => <span className="text-xs text-gray-400 truncate max-w-[150px] inline-block uppercase tracking-wider">{info.getValue() || '—'}</span>
+    }),
+    columnHelper.accessor('entry_strategy', {
+      header: 'ALGO_STRATEGY',
+      cell: info => <span className="text-[10px] bg-surface-card border border-surface-border px-1.5 py-0.5 rounded text-gray-400 font-mono">{info.getValue() || '—'}</span>
+    }),
+    columnHelper.accessor('exit_time', {
+      header: 'EXEC_TIME',
+      cell: info => {
+        const val = info.getValue()
+        return val ? (
+          <div className="flex flex-col">
+            <span className="text-gray-300">{formatET(val)}</span>
+            <span className="text-[10px] text-gray-500">{relativeTime(val)}</span>
+          </div>
+        ) : <span className="text-gray-500">—</span>
+      }
+    }),
+  ], [])
+
+  const table = useReactTable({
+    data: trades,
+    columns,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+  })
+
+  return (
+    <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0">
+        <div>
+          <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+            <Clock className="text-brand" /> 
+            Execution Log
+          </h1>
+          <div className="flex items-center gap-3 mt-2 mono text-xs text-gray-500">
+            <span>CLOSED_VECTORS: <span className="text-white">{trades.length}</span></span>
+            <span>|</span>
+            <span className="text-system-online">DB_CONNECTED</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={exportCSV} className="btn-ghost flex items-center gap-2 px-3 disabled:opacity-50" disabled={isLoading || trades.length === 0}>
             <Download size={14} />
-            Export CSV
+            <span className="mono text-xs uppercase tracking-wider">Dump Telemetry</span>
           </button>
-          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-1.5">
-            <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
-            Refresh
+          <div className="w-[1px] h-6 bg-surface-border"></div>
+          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
+            <span className="mono text-xs uppercase tracking-wider">Sync Log</span>
           </button>
         </div>
       </div>
 
-      {/* Summary metrics */}
+      {/* Summary Metrics Banner */}
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-          <MetricCard label="Total Trades" value={summary.total_trades} />
-          <MetricCard label="Winners" value={summary.winners} positive={summary.winners > 0} />
-          <MetricCard label="Losers" value={summary.losers} negative={summary.losers > 0} />
-          <MetricCard label="Win Rate" value={`${summary.win_rate}%`} positive={summary.win_rate >= 50} />
+        <div className="card p-4 grid grid-cols-2 md:grid-cols-6 gap-4 bg-gradient-to-r from-surface-card to-brand/5 border-l-2 border-l-brand shrink-0">
+          <MetricCard label="Total Executions" value={summary.total_trades} icon={<Activity size={14} />} />
+          <MetricCard label="Profitable" value={summary.winners} positive={summary.winners > 0} mono />
+          <MetricCard label="Losses" value={summary.losers} negative={summary.losers > 0} mono />
+          <MetricCard 
+            label="Win Ratio" 
+            value={`${summary.win_rate}%`} 
+            positive={summary.win_rate >= 50} 
+            negative={summary.win_rate < 50} 
+            mono 
+          />
           <MetricCard
-            label="Total PnL"
-            value={(summary.total_pnl >= 0 ? '+' : '') + summary.total_pnl.toFixed(2)}
+            label="Aggregate Delta"
+            value={formatPnL(summary.total_pnl)}
             positive={summary.total_pnl > 0}
             negative={summary.total_pnl < 0}
             mono
           />
           <MetricCard
-            label="Avg PnL"
-            value={(summary.avg_pnl >= 0 ? '+' : '') + summary.avg_pnl.toFixed(2)}
+            label="Mean Delta"
+            value={formatPnL(summary.avg_pnl)}
             positive={summary.avg_pnl > 0}
             negative={summary.avg_pnl < 0}
             mono
@@ -122,67 +217,87 @@ export default function TradeHistory() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="flex gap-3">
-        {['', 'crypto', 'stock'].map(c => (
-          <button
-            key={c}
-            onClick={() => setFilterClass(c)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              filterClass === c ? 'bg-brand text-white' : 'bg-surface-card text-gray-400 hover:text-white'
-            }`}
-          >
-            {c || 'All'}
-          </button>
-        ))}
-      </div>
-
-      {/* Trades table */}
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-surface-border text-xs text-gray-500 uppercase tracking-wider">
-              <th className="text-left px-5 py-3">Symbol</th>
-              <th className="text-left px-5 py-3">Class</th>
-              <th className="text-right px-5 py-3">Entry</th>
-              <th className="text-right px-5 py-3">Exit</th>
-              <th className="text-right px-5 py-3">PnL</th>
-              <th className="text-left px-5 py-3">Exit Reason</th>
-              <th className="text-left px-5 py-3">Strategy</th>
-              <th className="text-left px-5 py-3">Closed</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && (
-              <tr><td colSpan={8} className="px-5 py-8 text-center text-gray-500">Loading…</td></tr>
-            )}
-            {!isLoading && trades.length === 0 && (
-              <tr><td colSpan={8} className="px-5 py-8 text-center text-gray-500">No closed trades yet</td></tr>
-            )}
-            {trades.map(t => (
-              <tr key={t.id} className="border-b border-surface-border/50 table-row-hover">
-                <td className="px-5 py-3 mono font-medium text-white">{t.symbol}</td>
-                <td className="px-5 py-3">
-                  <span className={`badge ${t.asset_class === 'crypto' ? 'bg-violet-500/20 text-violet-400 border border-violet-500/30' : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'}`}>
-                    {t.asset_class}
-                  </span>
-                </td>
-                <td className="px-5 py-3 text-right mono text-gray-300">{t.entry_price?.toFixed(4) ?? '—'}</td>
-                <td className="px-5 py-3 text-right mono text-gray-300">{t.exit_price?.toFixed(4) ?? '—'}</td>
-                <td className={`px-5 py-3 text-right mono font-medium ${pnlColor(t.pnl_realized)}`}>
-                  {t.pnl_realized != null ? (t.pnl_realized >= 0 ? '+' : '') + t.pnl_realized.toFixed(4) : '—'}
-                </td>
-                <td className="px-5 py-3 text-gray-400 text-xs max-w-[160px] truncate">{t.exit_reason || '—'}</td>
-                <td className="px-5 py-3 text-gray-500 text-xs max-w-[140px] truncate">{t.entry_strategy || '—'}</td>
-                <td className="px-5 py-3 text-gray-400 text-xs whitespace-nowrap">
-                  {t.exit_time
-                    ? <span title={relativeTime(t.exit_time)}>{formatET(t.exit_time)}</span>
-                    : '—'}
-                </td>
-              </tr>
+      {/* Data Grid Section */}
+      <div className="flex-1 flex flex-col space-y-3 min-h-[400px]">
+        <div className="flex items-center justify-between px-1">
+          <div className="text-xs text-brand mono font-bold uppercase tracking-widest">Historical Matrix</div>
+          <div className="flex gap-2 bg-[#12141f] p-1 rounded-lg border border-surface-border">
+            {['', 'crypto', 'stock'].map(c => (
+              <button
+                key={c}
+                onClick={() => setFilterClass(c)}
+                className={clsx(
+                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                  filterClass === c 
+                    ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
+                    : "text-gray-500 hover:text-gray-300 border border-transparent"
+                )}
+              >
+                {c || 'Global'}
+              </button>
             ))}
-          </tbody>
-        </table>
+          </div>
+        </div>
+        
+        <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset">
+          {isLoading ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3">
+               <Activity className="animate-pulse-slow text-brand" size={32} />
+               <span className="mono text-xs uppercase tracking-widest">Compiling Trade Archives...</span>
+            </div>
+          ) : trades.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center text-gray-500 mono text-sm uppercase tracking-widest">
+              No Execution Logs Found
+            </div>
+          ) : (
+            <div className="overflow-auto flex-1 scrollbar-thin">
+              <table className="w-full text-left border-collapse">
+                <thead className="sticky top-0 z-20 bg-[#0b0c13] border-b border-surface-border">
+                  {table.getHeaderGroups().map(headerGroup => (
+                    <tr key={headerGroup.id}>
+                      {headerGroup.headers.map(header => (
+                        <th 
+                          key={header.id} 
+                          onClick={header.column.getToggleSortingHandler()}
+                          className={clsx(
+                            "py-3 px-5 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500 bg-surface-card/80 backdrop-blur-md select-none whitespace-nowrap",
+                            header.column.getCanSort() ? "cursor-pointer hover:text-white transition-colors group" : ""
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            {header.column.getCanSort() && (
+                              <ArrowUpDown size={12} className={clsx(
+                                "transition-opacity",
+                                header.column.getIsSorted() ? "opacity-100 text-brand" : "opacity-0 group-hover:opacity-50"
+                              )} />
+                            )}
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  ))}
+                </thead>
+                <tbody className="mono text-sm">
+                  {table.getRowModel().rows.map(row => (
+                    <tr key={row.id} className="border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors">
+                      {row.getVisibleCells().map(cell => (
+                        <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {/* Table Footer */}
+          <div className="bg-[#0b0c13] border-t border-surface-border px-5 py-2 flex justify-between items-center text-[10px] mono text-gray-600 uppercase tracking-widest shrink-0">
+            <span>{table.getRowModel().rows.length} Vectors Rendered</span>
+            <span>Archive Status: <span className="text-system-online">Nominal</span></span>
+          </div>
+        </div>
       </div>
     </div>
   )
