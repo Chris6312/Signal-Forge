@@ -17,8 +17,10 @@ Use the following Tradier MCP tools in sequence during each screening session:
 2. **get_market_movers** — Fetch today's top gainers (percentage gain, high volume). Focus on the top 20 gainers.
 3. **get_quotes** — Get real-time quotes for the top movers to confirm price, volume, and that the move is not a halted or erratic spike.
 4. **get_company_news** — For each shortlisted symbol, check recent news (last 24–48 h). Classify each headline as positive, negative, or neutral and compute an aggregate sentiment.
-5. **get_historical_quotes** — Pull 30 days of daily OHLCV to verify the symbol is in a trend (not a dead-cat bounce) and to confirm the current move is on above-average volume.
-6. **search_companies** (optional) — If a sector or theme appears repeatedly in the news, search for additional related symbols that are not yet in the movers list but show technical setups.
+5. **search_companies** (optional) — If a sector or theme appears repeatedly in the news, search for additional related symbols that are not yet in the movers list but show technical setups.
+
+## Use Web screening
+**get_historical_quotes** — Pull 30 days of daily OHLCV to verify the symbol is in a trend (not a dead-cat bounce) and to confirm the current move is on above-average volume.
 
 ## Screening criteria (all must pass)
 

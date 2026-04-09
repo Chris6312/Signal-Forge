@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.common.config import settings
 from app.common.database import init_db
 from app.common.runtime_state import runtime_state
-from app.api.routes import dashboard, watchlist, monitoring, positions, ledger, trades, audit, runtime
+from app.common.ws_manager import ws_manager
+from app.api.routes import dashboard, watchlist, monitoring, positions, ledger, trades, audit, runtime, ws
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +81,23 @@ async def heartbeat_worker():
             logger.error("Heartbeat error: %s", exc)
 
 
+async def ws_broadcast_worker():
+    from app.api.routes.ws import build_dashboard_payload, build_market_status_payload
+    tick = 0
+    while True:
+        try:
+            await asyncio.sleep(10)
+            tick += 1
+            if ws_manager._clients:
+                await ws_manager.broadcast("dashboard_update", await build_dashboard_payload())
+                if tick % 6 == 0:  # market status every ~60 s
+                    await ws_manager.broadcast("market_status_update", build_market_status_payload())
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("WS broadcast error: %s", exc)
+
+
 async def reconciliation_worker():
     while True:
         try:
@@ -135,6 +153,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting %s", settings.APP_NAME)
     await init_db()
     await runtime_state.initialize()
+    ws_manager.set_main_loop(asyncio.get_running_loop())
 
     _worker_threads: list[_WorkerThread] = []
     _main_tasks:     list[asyncio.Task]  = []
@@ -168,6 +187,7 @@ async def lifespan(app: FastAPI):
     _main_tasks.extend([
         asyncio.create_task(heartbeat_worker(),      name="heartbeat"),
         asyncio.create_task(reconciliation_worker(), name="reconciliation"),
+        asyncio.create_task(ws_broadcast_worker(),   name="ws_broadcast"),
     ])
 
     logger.info(
@@ -210,6 +230,7 @@ app.include_router(ledger.router, prefix="/api/ledger", tags=["ledger"])
 app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
 app.include_router(runtime.router, prefix="/api/runtime", tags=["runtime"])
+app.include_router(ws.router)
 
 
 @app.get("/health", tags=["health"])

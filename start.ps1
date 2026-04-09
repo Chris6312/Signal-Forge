@@ -40,7 +40,7 @@ Write-OK 'Docker is running.'
 # ── 2. Start containers ───────────────────────────────────────────────────────
 Write-Step 2 5 'Starting containers (docker compose up -d)...'
 Set-Location $ProjectRoot
-docker compose -f $ComposeFile up -d
+docker compose -f $ComposeFile up -d --build
 if ($LASTEXITCODE -ne 0) { Write-Error 'docker compose up failed.' }
 Write-OK 'Containers started.'
 

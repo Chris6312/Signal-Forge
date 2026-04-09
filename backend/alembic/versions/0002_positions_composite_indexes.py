@@ -18,19 +18,17 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # Covers: WHERE asset_class = ? AND state = ?
     # Used by: _count_open_positions (stock + crypto), exit-worker full load
-    op.create_index(
-        "ix_positions_asset_class_state",
-        "positions",
-        ["asset_class", "state"],
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_positions_asset_class_state"
+        " ON positions (asset_class, state)"
     )
 
     # Covers: WHERE symbol = ? AND asset_class = ? AND state = ?
     # Used by: _has_open_position (stock + crypto monitors, watchlist engine)
     #          WHERE symbol IN (...) AND state = ? (watchlist batch check)
-    op.create_index(
-        "ix_positions_symbol_asset_class_state",
-        "positions",
-        ["symbol", "asset_class", "state"],
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_positions_symbol_asset_class_state"
+        " ON positions (symbol, asset_class, state)"
     )
 
 

@@ -18,10 +18,9 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # Covers: WHERE asset_class = ? AND state = ?
     # Used by: StockMonitor._cycle() and CryptoMonitor._cycle() per-cycle symbol load
-    op.create_index(
-        "ix_watchlist_symbols_asset_class_state",
-        "watchlist_symbols",
-        ["asset_class", "state"],
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_watchlist_symbols_asset_class_state"
+        " ON watchlist_symbols (asset_class, state)"
     )
 
 

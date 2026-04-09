@@ -14,6 +14,7 @@ from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
 from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
+from app.common.ws_manager import ws_manager
 from app.stocks.tradier_client import tradier_client
 from app.stocks.strategies.entry_strategies import evaluate_all
 from app.common.market_hours import can_enter_trade, market_status
@@ -227,6 +228,14 @@ class StockMonitor:
                 "mode": trading_mode,
             },
         )
+
+        ws_manager.broadcast_from_thread("position_executed", {
+            "symbol":      ws.symbol,
+            "side":        "BUY",
+            "quantity":    float(quantity),
+            "price":       signal.entry_price,
+            "asset_class": ASSET_CLASS,
+        })
 
     def _select_exit_strategy(self, signal) -> str:
         if "Breakout" in signal.strategy or "Continuation" in signal.strategy:

@@ -1,4 +1,5 @@
 import logging
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
@@ -25,16 +26,9 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 async def init_db():
-    from app.common.models.base import Base
-    import app.common.models.watchlist  # noqa
-    import app.common.models.position   # noqa
-    import app.common.models.order      # noqa
-    import app.common.models.ledger     # noqa
-    import app.common.models.audit      # noqa
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables verified/created")
+    async with engine.connect() as conn:
+        await conn.execute(sa.text("SELECT 1"))
+    logger.info("Database connection verified")
 
 
 async def get_db():

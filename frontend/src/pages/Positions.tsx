@@ -14,7 +14,6 @@ import { Search, ArrowUpDown, TrendingUp, Activity, RefreshCw } from 'lucide-rea
 import StatusBadge from '@/components/StatusBadge'
 import clsx from 'clsx'
 
-// Note: Adapt these fields if your backend returns slightly different keys
 interface Position {
   id: string
   symbol: string
@@ -30,11 +29,13 @@ interface Position {
 
 const columnHelper = createColumnHelper<Position>()
 
-function formatCurrency(val: number) {
+function formatCurrency(val: number | null | undefined) {
+  if (val == null) return '$0.00'
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(val)
 }
 
-function formatPnL(val: number) {
+function formatPnL(val: number | null | undefined) {
+  if (val == null) return '0.00'
   const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(val))
   return val >= 0 ? `+${formatted}` : `-${formatted}`
 }
@@ -43,14 +44,17 @@ export default function Positions() {
   const [sorting, setSorting] = useState<SortingState>([{ id: 'unrealized_pnl', desc: true }])
   const [globalFilter, setGlobalFilter] = useState('')
 
-  // Poll slightly less frequently if WSS is active, or rely entirely on WSS cache invalidation
-  const { data: positions = [], isLoading, isRefetching, refetch } = useQuery<Position[]>({
+  // We use useQuery and ensure we default to an empty array even if the API returns a non-array response
+  const { data, isLoading, isRefetching, refetch } = useQuery<Position[]>({
     queryKey: ['positions'],
     queryFn: () => fetchPositions(),
-    staleTime: Infinity, 
+    // Defaulting staleTime to 10s to keep it fresh without overloading
+    staleTime: 10000, 
   })
 
-  // Define Data Columns
+  // Ensure positions is always an array to prevent .reduce/filter crashes
+  const positions = useMemo(() => Array.isArray(data) ? data : [], [data])
+
   const columns = useMemo(() => [
     columnHelper.accessor('symbol', {
       header: 'VECTOR (SYM)',
@@ -60,14 +64,16 @@ export default function Positions() {
             "w-1.5 h-1.5 rounded-full shadow-[0_0_5px_currentColor]",
             info.row.original.asset_class === 'crypto' ? 'text-[#5865F2] bg-[#5865F2]' : 'text-system-online bg-system-online'
           )}></div>
-          <span className="font-bold tracking-wider text-white">{info.getValue()}</span>
+          <span className="font-bold tracking-wider text-white">{info.getValue() || 'UNKNOWN'}</span>
         </div>
       ),
     }),
     columnHelper.accessor('side', {
       header: 'DIR',
       cell: info => {
-        const side = info.getValue().toUpperCase()
+        const val = info.getValue()
+        if (!val) return <span className="text-gray-500">—</span>
+        const side = val.toUpperCase()
         const isLong = side === 'LONG' || side === 'BUY'
         return (
           <span className={clsx(
@@ -81,7 +87,7 @@ export default function Positions() {
     }),
     columnHelper.accessor('quantity', {
       header: 'SIZE',
-      cell: info => <span className="text-gray-300">{info.getValue().toString()}</span>,
+      cell: info => <span className="text-gray-300">{(info.getValue() ?? 0).toString()}</span>,
     }),
     columnHelper.accessor('entry_price', {
       header: 'ENTRY_Px',
@@ -94,7 +100,7 @@ export default function Positions() {
     columnHelper.accessor('unrealized_pnl', {
       header: 'LIVE_DELTA (PnL)',
       cell: info => {
-        const val = info.getValue()
+        const val = info.getValue() ?? 0
         return (
           <span className={clsx(
             "font-bold transition-colors duration-300",
@@ -108,7 +114,7 @@ export default function Positions() {
     }),
     columnHelper.accessor('status', {
       header: 'STATE',
-      cell: info => <StatusBadge status={info.getValue()} />,
+      cell: info => <StatusBadge status={info.getValue() || 'unknown'} />,
     }),
   ], [])
 
@@ -123,9 +129,9 @@ export default function Positions() {
     getFilteredRowModel: getFilteredRowModel(),
   })
 
-  // Calculate aggregates
+  // Safe aggregate calculations
   const totalPnL = positions.reduce((acc, pos) => acc + (pos.unrealized_pnl || 0), 0)
-  const openCount = positions.filter(p => p.status === 'open').length
+  const openCount = positions.filter(p => p.status === 'open' || p.status === 'OPEN').length
 
   return (
     <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
@@ -150,7 +156,6 @@ export default function Positions() {
         </div>
         
         <div className="flex items-center gap-3">
-          {/* Omni-Filter */}
           <div className="relative group">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-brand transition-colors" />
             <input
@@ -171,7 +176,6 @@ export default function Positions() {
 
       {/* Main Data Grid */}
       <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative z-10 shadow-card-inset">
-        
         {isLoading ? (
           <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3 min-h-[400px]">
              <Activity className="animate-pulse-slow text-brand" size={32} />
@@ -212,10 +216,7 @@ export default function Positions() {
               </thead>
               <tbody className="mono text-sm">
                 {table.getRowModel().rows.map(row => (
-                  <tr 
-                    key={row.id} 
-                    className="border-b border-surface-border/50 hover:bg-white/[0.02] transition-colors group"
-                  >
+                  <tr key={row.id} className="border-b border-surface-border/50 hover:bg-white/[0.02] transition-colors group">
                     {row.getVisibleCells().map(cell => (
                       <td key={cell.id} className="py-3.5 px-5 whitespace-nowrap">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -227,8 +228,6 @@ export default function Positions() {
             </table>
           </div>
         )}
-        
-        {/* Table Footer Status */}
         <div className="bg-[#0b0c13] border-t border-surface-border px-5 py-2.5 flex justify-between items-center text-[10px] mono text-gray-600 uppercase tracking-widest shrink-0">
           <span>{table.getRowModel().rows.length} Vectors Rendered</span>
           <span>Matrix Status: <span className="text-system-online">Nominal</span></span>
