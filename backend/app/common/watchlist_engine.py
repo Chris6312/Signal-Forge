@@ -1,7 +1,6 @@
 import uuid
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 from typing import List
 
 from sqlalchemy import select
@@ -60,7 +59,7 @@ class WatchlistEngine:
         }
 
         added, removed, retained, promoted = [], [], [], []
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         for symbol, asset_class in incoming:
             key = (symbol, asset_class)
@@ -178,7 +177,7 @@ class WatchlistEngine:
         if has_open:
             return False
 
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         ws.state = SymbolState.INACTIVE
         ws.closed_at = now
         await log_event(

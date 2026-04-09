@@ -1,8 +1,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 
@@ -146,7 +145,7 @@ class CryptoMonitor:
                 db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct
             )
 
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         frozen_policy = {
             "entry_strategy": signal.strategy,
             "exit_strategy": self._select_exit_strategy(signal),
@@ -223,6 +222,9 @@ class CryptoMonitor:
                 "tp1": signal.profit_target_1,
                 "confidence": signal.confidence,
                 "mode": trading_mode,
+                "regime": signal.regime,
+                "notes": signal.notes,
+                "reasoning": signal.reasoning,
             },
         )
 

@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, String, DateTime, Text, JSON, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
@@ -27,4 +27,4 @@ class AuditEvent(Base):
     source = Column(SAEnum(AuditSource, native_enum=False), nullable=False, default=AuditSource.SYSTEM)
     event_data = Column(JSON, nullable=True)
     message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True)

@@ -110,7 +110,7 @@ async def reconciliation_worker():
 
 
 async def _run_reconciliation():
-    from datetime import datetime
+    from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
     from sqlalchemy import select, func
     from app.common.database import AsyncSessionLocal

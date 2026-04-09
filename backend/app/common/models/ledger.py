@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, String, DateTime, Float, Text, ForeignKey, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
@@ -26,7 +26,7 @@ class LedgerAccount(Base):
     realized_pnl = Column(Float, nullable=False, default=0.0)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
     last_reconciled_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
 
 class LedgerEntry(Base):
@@ -41,4 +41,4 @@ class LedgerEntry(Base):
     position_id = Column(UUID(as_uuid=True), ForeignKey("positions.id"), nullable=True)
     order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

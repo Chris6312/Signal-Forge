@@ -1,7 +1,6 @@
 import uuid
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +71,7 @@ async def record_paper_fill(
 
     cost = round(quantity * price, 8)
     account.cash_balance -= cost
-    account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     entry = LedgerEntry(
         id=uuid.uuid4(),
@@ -84,7 +83,7 @@ async def record_paper_fill(
         position_id=position_id,
         order_id=order_id,
         notes=f"Paper entry: {symbol} × {quantity:.6f} @ {price:.4f}",
-        created_at=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None),
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(entry)
 
@@ -102,7 +101,7 @@ async def record_paper_fill(
             position_id=position_id,
             order_id=order_id,
             notes=f"Kraken taker fee {KRAKEN_TAKER_FEE_RATE * 100:.2f}% on entry: {symbol}",
-            created_at=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None),
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         db.add(fee_entry)
 

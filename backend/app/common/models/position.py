@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, Index, String, DateTime, Float, Integer, Text, JSON, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
@@ -61,7 +61,7 @@ class Position(Base):
     pnl_unrealized = Column(Float, nullable=True)
     fees_paid = Column(Float, nullable=True, default=0.0)
 
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
 
     orders = relationship("Order", back_populates="position", lazy="select")

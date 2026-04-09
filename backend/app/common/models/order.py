@@ -1,6 +1,6 @@
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, String, DateTime, Float, Text, ForeignKey, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
@@ -45,7 +45,7 @@ class Order(Base):
     fill_price = Column(Float, nullable=True)
     status = Column(SAEnum(OrderStatus, native_enum=False), nullable=False, default=OrderStatus.PENDING)
     broker_order_id = Column(String(100), nullable=True)
-    placed_at = Column(DateTime, default=datetime.utcnow)
+    placed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     filled_at = Column(DateTime, nullable=True)
     fees = Column(Float, nullable=True, default=0.0)
     notes = Column(Text, nullable=True)

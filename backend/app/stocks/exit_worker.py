@@ -1,7 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -12,6 +11,7 @@ from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
 from app.common.market_hours import can_pull_data
+from app.common.redis_client import get_redis
 from app.common.watchlist_engine import watchlist_engine
 from app.stocks.tradier_client import tradier_client
 from app.stocks.strategies.exit_strategies import evaluate_exit
@@ -20,6 +20,8 @@ from app.stocks.ledger import stock_ledger
 logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "stock"
+REENTRY_COOLDOWN_SECONDS = 30 * 60   # 30-minute cooldown after a stop-out
+COOLDOWN_KEY_PREFIX = "cooldown:stock:"
 
 
 class StockExitWorker:
@@ -69,7 +71,7 @@ class StockExitWorker:
             return
 
         position.current_price = current_price
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         if not position.quantity or position.quantity <= 0:
             await self._close_position(
@@ -172,6 +174,22 @@ class StockExitWorker:
 
         position.updated_at = now
 
+    async def _set_reentry_cooldown(self, symbol: str):
+        """Block re-entry on this symbol for REENTRY_COOLDOWN_SECONDS after a stop-out."""
+        try:
+            redis = await get_redis()
+            await redis.set(
+                f"{COOLDOWN_KEY_PREFIX}{symbol}",
+                "1",
+                ex=REENTRY_COOLDOWN_SECONDS,
+            )
+            logger.info(
+                "Re-entry cooldown set for %s (%d min)",
+                symbol, REENTRY_COOLDOWN_SECONDS // 60,
+            )
+        except Exception as exc:
+            logger.warning("Failed to set re-entry cooldown for %s: %s", symbol, exc)
+
     async def _close_position(self, db, position: Position, exit_price: float, reason: str, now):
         net_proceeds = 0.0
         pnl = 0.0
@@ -213,6 +231,10 @@ class StockExitWorker:
         )
         await watchlist_engine.release_managed_symbol(db, position.symbol, ASSET_CLASS)
         logger.info("Stock position closed: %s | PnL: %.2f | Reason: %s", position.symbol, pnl, reason)
+
+        stop_keywords = ("stop hit", "trail stop", "zero quantity", "time stop")
+        if any(kw in reason.lower() for kw in stop_keywords):
+            await self._set_reentry_cooldown(position.symbol)
 
 
 stock_exit_worker = StockExitWorker()

@@ -1,6 +1,5 @@
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select, update
@@ -93,10 +92,10 @@ async def reset_paper_data(
     await db.execute(
         update(WatchlistSymbol)
         .where(WatchlistSymbol.state == SymbolState.MANAGED)
-        .values(state=SymbolState.INACTIVE, closed_at=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None))
+        .values(state=SymbolState.INACTIVE, closed_at=datetime.now(timezone.utc).replace(tzinfo=None))
     )
 
-    now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     for asset_class, seed in [
         ("crypto", initial_crypto_balance),
         ("stock",  initial_stock_balance),

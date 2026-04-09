@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ class StockEntrySignal:
     confidence: float
     max_hold_hours: int = 8
     notes: str = ""
+    reasoning: dict = field(default_factory=dict)
 
 
 def _ema(prices: list[float], period: int) -> list[float]:
@@ -108,6 +109,12 @@ class OpeningRangeBreakout:
             confidence=0.72,
             max_hold_hours=8,
             notes=f"Breakout above OR high {or_high:.2f}",
+            reasoning={
+                "timeframe": self.primary_tf, "atr": round(atr, 6),
+                "or_high_5": round(or_high, 6),
+                "ema20": round(ema20[-1], 6) if ema20 else None,
+                "breakout_pct": round((current / or_high - 1) * 100, 3),
+            },
         )
 
 
@@ -137,10 +144,10 @@ class PullbackReclaim:
         if not (was_below and current > ema_val):
             return None
 
-        stop = min(lows[-5:]) - atr * 0.2
+        pullback_low = min(lows[-5:])
+        stop = pullback_low - atr * 0.2
         tp1 = current + atr * 1.5
         tp2 = current + atr * 2.5
-
         return StockEntrySignal(
             strategy=self.name,
             symbol=symbol,
@@ -152,6 +159,13 @@ class PullbackReclaim:
             confidence=0.68,
             max_hold_hours=6,
             notes="Pullback to EMA20 reclaimed",
+            reasoning={
+                "timeframe": self.primary_tf, "atr": round(atr, 6),
+                "ema20": round(ema_val, 6),
+                "pullback_low_5": round(pullback_low, 6),
+                "current_vs_ema20": round(current - ema_val, 6),
+                "dip_below_ema_confirmed": True,
+            },
         )
 
 
@@ -197,6 +211,13 @@ class TrendContinuationLadder:
             confidence=0.70,
             max_hold_hours=8,
             notes="Higher highs/lows ladder confirmed",
+            reasoning={
+                "timeframe": self.primary_tf, "atr": round(atr, 6),
+                "ema20": round(ema20[-1], 6) if ema20 else None,
+                "higher_highs_confirmed": True, "higher_lows_confirmed": True,
+                "swing_high_1": round(highs[-1], 6), "swing_high_2": round(highs[-2], 6),
+                "swing_low_1": round(lows[-1], 6), "swing_low_2": round(lows[-2], 6),
+            },
         )
 
 
@@ -241,6 +262,12 @@ class MeanReversionBounce:
                 confidence=0.62,
                 max_hold_hours=4,
                 notes=f"{pct_below*100:.1f}% below mean, bouncing",
+                reasoning={
+                    "timeframe": self.primary_tf, "atr": round(atr, 6),
+                    "ema50_mean": round(mean, 6),
+                    "pct_below_mean": round(pct_below * 100, 3),
+                    "threshold_pct": 2.5, "bounce_confirmed": True,
+                },
             )
         return None
 
@@ -280,6 +307,13 @@ class FailedBreakdownReclaim:
                 confidence=0.67,
                 max_hold_hours=6,
                 notes=f"Failed breakdown below {support:.2f} reclaimed",
+                reasoning={
+                    "timeframe": self.primary_tf, "atr": round(atr, 6),
+                    "support_level": round(support, 6),
+                    "breakdown_low": round(recent_min, 6),
+                    "breakdown_depth_atr": round((support - recent_min) / atr, 3) if atr else None,
+                    "one_close_above_support": True,
+                },
             )
         return None
 
@@ -326,6 +360,15 @@ class VolatilityCompressionBreakout:
             confidence=0.73,
             max_hold_hours=8,
             notes=f"Volatility compressed, breakout above {compression_high:.2f}",
+            reasoning={
+                "timeframe": self.primary_tf,
+                "atr_recent_10": round(atr_recent, 6),
+                "atr_prior_20": round(atr_prior, 6),
+                "compression_ratio": round(atr_recent / atr_prior, 3),
+                "compression_threshold": 0.6,
+                "compression_high_10": round(compression_high, 6),
+                "breakout_pct": round((current / compression_high - 1) * 100, 3),
+            },
         )
 
 
@@ -367,7 +410,13 @@ def evaluate_all(
         try:
             sig = strategy.evaluate(symbol, primary)
             if sig:
-                signals.append(sig)
+                if sig.initial_stop >= sig.entry_price:
+                    logger.warning(
+                        "Skipping %s signal for %s: stop %.4f >= entry %.4f (near-zero ATR)",
+                        sig.strategy, symbol, sig.initial_stop, sig.entry_price,
+                    )
+                else:
+                    signals.append(sig)
         except Exception as exc:
             logger.error("Stock strategy %s error for %s: %s", strategy.name, symbol, exc)
     signals.sort(key=lambda s: s.confidence, reverse=True)

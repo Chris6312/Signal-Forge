@@ -2,8 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from app.api.deps import get_db_session
 from app.api.schemas.ledger import LedgerAccountOut, LedgerEntryOut, LedgerAdjustmentIn
@@ -53,7 +52,7 @@ async def create_adjustment(
         await db.flush()
 
     account.cash_balance += body.amount
-    account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     entry = LedgerEntry(
         id=uuid.uuid4(),
@@ -62,7 +61,7 @@ async def create_adjustment(
         amount=body.amount,
         balance_after=account.cash_balance,
         notes=body.notes,
-        created_at=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None),
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(entry)
     await db.flush()

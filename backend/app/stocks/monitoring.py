@@ -1,8 +1,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 
@@ -15,6 +14,7 @@ from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
 from app.common.ws_manager import ws_manager
+from app.common.redis_client import get_redis
 from app.stocks.tradier_client import tradier_client
 from app.stocks.strategies.entry_strategies import evaluate_all
 from app.common.market_hours import can_enter_trade, market_status
@@ -26,6 +26,7 @@ from app.stocks.candle_fetcher import StockCandleFetcher
 logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "stock"
+COOLDOWN_KEY_PREFIX = "cooldown:stock:"
 
 
 class StockMonitor:
@@ -107,6 +108,14 @@ class StockMonitor:
         if already_open:
             return
 
+        try:
+            redis = await get_redis()
+            if await redis.exists(f"{COOLDOWN_KEY_PREFIX}{ws.symbol}"):
+                logger.debug("Re-entry cooldown active for %s — skipping", ws.symbol)
+                return
+        except Exception as exc:
+            logger.warning("Cooldown check failed for %s: %s", ws.symbol, exc)
+
         candles_by_tf = {
             "1m":    self._store.get(ws.symbol, TF_MINUTES["1m"]),
             "5m":    self._store.get(ws.symbol, TF_MINUTES["5m"]),
@@ -147,7 +156,7 @@ class StockMonitor:
                 db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct
             )
 
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         exit_strategy = self._select_exit_strategy(signal)
 
         frozen_policy = {
@@ -226,6 +235,9 @@ class StockMonitor:
                 "tp1": signal.profit_target_1,
                 "confidence": signal.confidence,
                 "mode": trading_mode,
+                "regime": signal.regime,
+                "notes": signal.notes,
+                "reasoning": signal.reasoning,
             },
         )
 
@@ -238,12 +250,12 @@ class StockMonitor:
         })
 
     def _select_exit_strategy(self, signal) -> str:
+        if "Opening Range" in signal.strategy:
+            return "End-of-Day Exit"
         if "Breakout" in signal.strategy or "Continuation" in signal.strategy:
             return "Partial at TP1, Trail Remainder"
         if "Mean Reversion" in signal.strategy:
             return "First Failed Follow-Through Exit"
-        if "Opening Range" in signal.strategy:
-            return "End-of-Day Exit"
         return "Fixed Risk then Break-Even Promotion"
 
     async def _has_open_position(self, db, symbol: str) -> bool:

@@ -1,7 +1,6 @@
 import uuid
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +42,7 @@ class StockLedger:
     ) -> LedgerEntry:
         account = await self.get_account(db)
         account.cash_balance += amount
-        account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         entry = LedgerEntry(
             id=uuid.uuid4(),
             asset_class=ASSET_CLASS,
@@ -70,7 +69,7 @@ class StockLedger:
         account = await self.get_account(db)
         account.cash_balance -= fee
         account.fees_total += fee
-        account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         entry = LedgerEntry(
             id=uuid.uuid4(),
             asset_class=ASSET_CLASS,
@@ -96,7 +95,7 @@ class StockLedger:
         account = await self.get_account(db)
         account.realized_pnl += pnl
         account.cash_balance += pnl
-        account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         entry = LedgerEntry(
             id=uuid.uuid4(),
             asset_class=ASSET_CLASS,
@@ -128,7 +127,7 @@ class StockLedger:
         account = await self.get_account(db)
         account.cash_balance += net_proceeds
         account.realized_pnl += pnl
-        account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         entry = LedgerEntry(
             id=uuid.uuid4(),
@@ -147,7 +146,7 @@ class StockLedger:
     async def update_unrealized(self, db: AsyncSession, unrealized_pnl: float):
         account = await self.get_account(db)
         account.unrealized_pnl = unrealized_pnl
-        account.updated_at = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.flush()
 
     async def get_summary(self) -> dict:

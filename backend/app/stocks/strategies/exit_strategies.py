@@ -1,8 +1,7 @@
 import logging
 from dataclasses import dataclass
 from typing import Optional
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from app.common.market_hours import is_near_eod as _is_near_eod
 
@@ -47,7 +46,7 @@ class FixedRiskBreakEvenPromotion:
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit — intraday position")
 
-        if not milestone.get("be_promoted") and tp1 and current_price >= tp1 * 0.5:
+        if not milestone.get("be_promoted") and tp1 and entry and current_price >= entry + (tp1 - entry) * 0.5:
             new_stop = max(stop, entry)
             return StockExitDecision(False, "Stop promoted to break-even", new_stop=new_stop)
 
@@ -125,7 +124,7 @@ class TimeStopExit:
             return StockExitDecision(True, "End-of-day exit")
 
         if position.entry_time and position.max_hold_hours:
-            now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             hours_held = (now - position.entry_time).total_seconds() / 3600
             if hours_held >= position.max_hold_hours and current_price < entry * 1.003:
                 return StockExitDecision(True, f"Time stop — {position.max_hold_hours}h exceeded without progress")

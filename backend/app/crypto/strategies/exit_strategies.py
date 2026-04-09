@@ -174,14 +174,13 @@ class TimeDegradationExit:
     name = "Time Degradation Exit"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
+        from datetime import datetime, timezone
         stop = position.current_stop or position.initial_stop
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         if position.entry_time and position.max_hold_hours:
-            now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             hours_held = (now - position.entry_time).total_seconds() / 3600
             entry = position.entry_price
             if hours_held >= position.max_hold_hours and current_price < entry * 1.005:

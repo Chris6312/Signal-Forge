@@ -1,7 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -67,7 +66,7 @@ class CryptoExitWorker:
             return
 
         position.current_price = current_price
-        now = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         if not position.quantity or position.quantity <= 0:
             await self._close_position(

@@ -1,7 +1,6 @@
 import uuid
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +28,7 @@ async def log_event(
         source=source,
         event_data=event_data or {},
         message=message,
-        created_at=datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None),
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(event)
     await db.flush()
