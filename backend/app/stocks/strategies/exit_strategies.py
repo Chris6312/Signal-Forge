@@ -4,7 +4,7 @@ from typing import Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.common.market_hours import is_near_eod
+from app.common.market_hours import is_near_eod as _is_near_eod
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class FixedRiskBreakEvenPromotion:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit — intraday position")
 
         if not milestone.get("be_promoted") and tp1 and current_price >= tp1 * 0.5:
@@ -67,7 +67,7 @@ class PartialAtTP1TrailRemainder:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
         if not milestone.get("tp1_hit") and tp1 and current_price >= tp1:
@@ -100,7 +100,7 @@ class FirstFailedFollowThroughExit:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
         if len(history) >= 3:
@@ -121,7 +121,7 @@ class TimeStopExit:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
         if position.entry_time and position.max_hold_hours:
@@ -142,7 +142,7 @@ class VWAPStructureLossExit:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
         if len(history) >= 10:
@@ -162,7 +162,7 @@ class EndOfDayExit:
         if current_price <= stop:
             return StockExitDecision(True, f"Stop hit at {stop:.2f}")
 
-        if is_near_eod():
+        if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit — session closing")
 
         return StockExitDecision(False, "Holding")
