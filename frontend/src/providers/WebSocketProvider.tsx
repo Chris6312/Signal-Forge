@@ -23,7 +23,7 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
   const [lastMessageTime, setLastMessageTime] = useState<number | null>(null)
   
   const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>()
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const queryClient = useQueryClient()
 
   useEffect(() => {

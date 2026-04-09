@@ -1,9 +1,19 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  getFilteredRowModel,
+  useReactTable,
+  SortingState,
+} from '@tanstack/react-table'
 import { fetchWatchlist, postWatchlistUpdate } from '@/api/endpoints'
 import StatusBadge from '@/components/StatusBadge'
-import { RefreshCw, Plus, ChevronDown, ChevronUp } from 'lucide-react'
+import { RefreshCw, Search, Crosshair, TerminalSquare, Activity, ArrowUpDown } from 'lucide-react'
 import { formatET, relativeTime } from '@/utils/time'
+import clsx from 'clsx'
 
 interface WatchlistSymbol {
   id: string
@@ -29,10 +39,15 @@ const EXAMPLE_PAYLOAD = JSON.stringify(
   2,
 )
 
+const columnHelper = createColumnHelper<WatchlistSymbol>()
+
 export default function Watchlist() {
   const qc = useQueryClient()
   const [filterState, setFilterState] = useState<string>('')
   const [filterClass, setFilterClass] = useState<string>('')
+  const [globalFilter, setGlobalFilter] = useState('')
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'added_at', desc: true }])
+  
   const [jsonInput, setJsonInput] = useState(EXAMPLE_PAYLOAD)
   const [jsonOpen, setJsonOpen] = useState(false)
   const [updateResult, setUpdateResult] = useState<string | null>(null)
@@ -41,7 +56,7 @@ export default function Watchlist() {
   if (filterState) params.state = filterState
   if (filterClass) params.asset_class = filterClass
 
-  const { data = [], isLoading, refetch } = useQuery<WatchlistSymbol[]>({
+  const { data = [], isLoading, isRefetching, refetch } = useQuery<WatchlistSymbol[]>({
     queryKey: ['watchlist', filterState, filterClass],
     queryFn: () => fetchWatchlist(params),
     refetchInterval: 15000,
@@ -50,9 +65,12 @@ export default function Watchlist() {
   const mutation = useMutation({
     mutationFn: (body: { watchlist: object[]; source_id: string }) => postWatchlistUpdate(body),
     onSuccess: (result) => {
-      setUpdateResult(JSON.stringify(result, null, 2))
+      setUpdateResult(`[SYS_SUCCESS] Payload accepted. \n${JSON.stringify(result, null, 2)}`)
       qc.invalidateQueries({ queryKey: ['watchlist'] })
     },
+    onError: (error: any) => {
+      setUpdateResult(`[SYS_ERROR] Rejection: ${error.message}`)
+    }
   })
 
   const handleSubmit = () => {
@@ -60,144 +78,254 @@ export default function Watchlist() {
       const parsed = JSON.parse(jsonInput)
       mutation.mutate({ watchlist: parsed.watchlist, source_id: 'manual' })
     } catch {
-      setUpdateResult('Error: invalid JSON')
+      setUpdateResult('[SYS_ERROR] Invalid JSON payload sequence.')
     }
   }
+
+  const columns = useMemo(() => [
+    columnHelper.accessor('symbol', {
+      header: 'RADAR_TARGET',
+      cell: info => (
+        <div className="flex items-center gap-2">
+          <div className={clsx(
+            "w-1.5 h-1.5 rounded-full shadow-[0_0_5px_currentColor]",
+            info.row.original.asset_class === 'crypto' ? 'text-[#5865F2] bg-[#5865F2]' : 'text-system-online bg-system-online'
+          )}></div>
+          <span className="font-bold tracking-wider text-white text-sm">{info.getValue()}</span>
+        </div>
+      ),
+    }),
+    columnHelper.accessor('state', {
+      header: 'STATUS',
+      cell: info => <StatusBadge status={info.getValue()} />,
+    }),
+    columnHelper.accessor('asset_class', {
+      header: 'NODE',
+      cell: info => <span className="text-xs text-gray-400 uppercase tracking-widest">{info.getValue()}</span>
+    }),
+    columnHelper.accessor('watchlist_source_id', {
+      header: 'ORIGIN_ID',
+      cell: info => <span className="text-[10px] text-gray-500 font-mono bg-surface-card border border-surface-border px-1.5 py-0.5 rounded">{info.getValue() || 'MANUAL'}</span>,
+    }),
+    columnHelper.accessor('added_at', {
+      header: 'ACQUIRED_AT',
+      cell: info => {
+        const val = info.getValue()
+        return val ? (
+          <div className="flex flex-col">
+            <span className="text-gray-300">{formatET(val)}</span>
+            <span className="text-[10px] text-gray-500">{relativeTime(val)}</span>
+          </div>
+        ) : <span className="text-gray-500">—</span>
+      },
+    }),
+    columnHelper.accessor('managed_since', {
+      header: 'MANAGED_SINCE',
+      cell: info => {
+        const val = info.getValue()
+        return val ? (
+          <div className="flex flex-col">
+            <span className="text-brand font-medium drop-shadow-[0_0_5px_rgba(99,102,241,0.5)]">{formatET(val)}</span>
+            <span className="text-[10px] text-gray-500">{relativeTime(val)}</span>
+          </div>
+        ) : <span className="text-gray-500">—</span>
+      },
+    }),
+  ], [])
+
+  const table = useReactTable({
+    data,
+    columns,
+    state: { sorting, globalFilter },
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+  })
 
   const active = data.filter(s => s.state === 'ACTIVE')
   const managed = data.filter(s => s.state === 'MANAGED')
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold text-white">Watchlist</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {active.length} active · {managed.length} managed
-          </p>
+          <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+            <Crosshair className="text-brand" /> 
+            Radar Array
+          </h1>
+          <div className="flex items-center gap-3 mt-2 mono text-xs text-gray-500">
+            <span>ACTIVE_TARGETS: <span className="text-white">{active.length}</span></span>
+            <span>|</span>
+            <span>MANAGED_TARGETS: <span className="text-brand">{managed.length}</span></span>
+          </div>
         </div>
-        <button onClick={() => refetch()} className="btn-ghost flex items-center gap-1.5">
-          <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        
+        <div className="flex items-center gap-3">
+          {/* Omni-Filter */}
+          <div className="relative group hidden md:block">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-brand transition-colors" />
+            <input
+              type="text"
+              value={globalFilter ?? ''}
+              onChange={e => setGlobalFilter(e.target.value)}
+              placeholder="Scan array..."
+              className="bg-[#12141f] border border-surface-border rounded-lg py-1.5 pl-9 pr-4 text-white font-mono text-sm focus:outline-none focus:border-brand/50 focus:ring-1 focus:ring-brand/50 w-48 transition-all"
+            />
+          </div>
+          <div className="w-[1px] h-6 bg-surface-border"></div>
+          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
+            <span className="mono text-xs uppercase tracking-wider">Sync Array</span>
+          </button>
+        </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex gap-3 flex-wrap">
-        {['', 'ACTIVE', 'MANAGED'].map(s => (
-          <button
-            key={s}
-            onClick={() => setFilterState(s)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              filterState === s ? 'bg-brand text-white' : 'bg-surface-card text-gray-400 hover:text-white'
-            }`}
-          >
-            {s || 'All'}
-          </button>
-        ))}
-        <div className="w-px bg-surface-border mx-1" />
-        {['', 'crypto', 'stock'].map(c => (
-          <button
-            key={c}
-            onClick={() => setFilterClass(c)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              filterClass === c ? 'bg-brand text-white' : 'bg-surface-card text-gray-400 hover:text-white'
-            }`}
-          >
-            {c || 'All'}
-          </button>
-        ))}
-      </div>
-
-      {/* Symbol table */}
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-surface-border text-xs text-gray-500 uppercase tracking-wider">
-              <th className="text-left px-5 py-3">Symbol</th>
-              <th className="text-left px-5 py-3">Class</th>
-              <th className="text-left px-5 py-3">State</th>
-              <th className="text-left px-5 py-3">Source ID</th>
-              <th className="text-left px-5 py-3">Added</th>
-              <th className="text-left px-5 py-3">Managed Since</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && (
-              <tr>
-                <td colSpan={6} className="px-5 py-8 text-center text-gray-500">Loading…</td>
-              </tr>
-            )}
-            {!isLoading && data.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-5 py-8 text-center text-gray-500">No symbols found</td>
-              </tr>
-            )}
-            {data.map(sym => (
-              <tr key={sym.id} className="border-b border-surface-border/50 table-row-hover">
-                <td className="px-5 py-3 font-medium mono text-white">{sym.symbol}</td>
-                <td className="px-5 py-3">
-                  <span className={`badge ${sym.asset_class === 'crypto' ? 'bg-violet-500/20 text-violet-400 border border-violet-500/30' : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'}`}>
-                    {sym.asset_class}
-                  </span>
-                </td>
-                <td className="px-5 py-3"><StatusBadge status={sym.state} /></td>
-                <td className="px-5 py-3 text-gray-500 mono text-xs">{sym.watchlist_source_id || '—'}</td>
-                <td className="px-5 py-3 text-gray-400 text-xs whitespace-nowrap">
-                  {sym.added_at
-                    ? <span title={relativeTime(sym.added_at)}>{formatET(sym.added_at)}</span>
-                    : '—'}
-                </td>
-                <td className="px-5 py-3 text-gray-400 text-xs whitespace-nowrap">
-                  {sym.managed_since
-                    ? <span title={relativeTime(sym.managed_since)}>{formatET(sym.managed_since)}</span>
-                    : '—'}
-                </td>
-              </tr>
+      {/* Manual Override Console */}
+      <div className="card space-y-4 bg-[#0d0f18] shrink-0 border-brand/20">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex gap-2 bg-[#12141f] p-1 rounded-lg border border-surface-border self-start">
+            {['', 'ACTIVE', 'MANAGED'].map(s => (
+              <button
+                key={s}
+                onClick={() => setFilterState(s)}
+                className={clsx(
+                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                  filterState === s 
+                    ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
+                    : "text-gray-500 hover:text-gray-300 border border-transparent"
+                )}
+              >
+                {s || 'ALL_STATES'}
+              </button>
             ))}
-          </tbody>
-        </table>
-      </div>
+            <div className="w-px bg-surface-border mx-1" />
+            {['', 'crypto', 'stock'].map(c => (
+              <button
+                key={c}
+                onClick={() => setFilterClass(c)}
+                className={clsx(
+                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                  filterClass === c 
+                    ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
+                    : "text-gray-500 hover:text-gray-300 border border-transparent"
+                )}
+              >
+                {c || 'ALL_NODES'}
+              </button>
+            ))}
+          </div>
 
-      {/* Manual update */}
-      <div className="card space-y-4">
-        <button
-          className="flex items-center gap-2 w-full text-sm font-medium text-gray-300"
-          onClick={() => setJsonOpen(o => !o)}
-        >
-          <Plus size={14} className="text-brand" />
-          Manual Watchlist Update
-          {jsonOpen ? <ChevronUp size={14} className="ml-auto" /> : <ChevronDown size={14} className="ml-auto" />}
-        </button>
+          <button
+            onClick={() => setJsonOpen(o => !o)}
+            className="flex items-center gap-2 text-xs font-mono font-bold tracking-widest uppercase text-brand hover:text-white transition-colors px-3 py-1.5 rounded border border-brand/30 hover:bg-brand/10"
+          >
+            <TerminalSquare size={14} />
+            {jsonOpen ? 'Close Terminal' : 'Inject Payload'}
+          </button>
+        </div>
 
         {jsonOpen && (
-          <div className="space-y-3">
-            <p className="text-xs text-gray-500">
-              Paste the AI-generated watchlist JSON below and click Submit.
-            </p>
-            <textarea
-              className="w-full bg-surface border border-surface-border rounded-lg p-3 text-sm mono text-gray-300 focus:outline-none focus:border-brand resize-none"
-              rows={10}
-              value={jsonInput}
-              onChange={e => setJsonInput(e.target.value)}
-            />
-            <div className="flex gap-3">
-              <button onClick={handleSubmit} className="btn-primary" disabled={mutation.isPending}>
-                {mutation.isPending ? 'Submitting…' : 'Submit Watchlist'}
-              </button>
+          <div className="pt-4 border-t border-surface-border space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-gray-500 mono uppercase tracking-widest flex items-center gap-2">
+                <TerminalSquare size={12} /> Awaiting raw JSON sequence...
+              </span>
               {updateResult && (
-                <button onClick={() => setUpdateResult(null)} className="btn-ghost text-xs">
-                  Clear result
+                <button onClick={() => setUpdateResult(null)} className="text-[10px] text-gray-500 hover:text-white mono uppercase">
+                  [ CLEAR_BUFFER ]
                 </button>
               )}
             </div>
+            
+            <textarea
+              className="w-full bg-[#0b0c13] border border-surface-border rounded p-4 text-xs mono text-gray-300 focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand resize-none shadow-card-inset"
+              rows={8}
+              value={jsonInput}
+              onChange={e => setJsonInput(e.target.value)}
+              spellCheck="false"
+            />
+            
+            <div className="flex items-center gap-4">
+              <button onClick={handleSubmit} className="btn-primary flex items-center gap-2 py-2 px-6" disabled={mutation.isPending}>
+                {mutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Activity size={14} />}
+                <span className="mono text-xs uppercase tracking-widest font-bold">Execute Injection</span>
+              </button>
+            </div>
+
             {updateResult && (
-              <pre className="bg-surface rounded-lg p-3 text-xs mono text-gray-300 overflow-auto max-h-48">
+              <pre className={clsx(
+                "rounded border p-3 text-[10px] mono overflow-auto max-h-48 mt-2",
+                updateResult.includes('[SYS_ERROR]') ? "bg-system-offline/10 border-system-offline/30 text-system-offline" : "bg-system-online/10 border-system-online/30 text-system-online"
+              )}>
                 {updateResult}
               </pre>
             )}
           </div>
         )}
+      </div>
+
+      {/* Target Data Grid */}
+      <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset">
+        {isLoading ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3 min-h-[400px]">
+             <Activity className="animate-pulse-slow text-brand" size={32} />
+             <span className="mono text-xs uppercase tracking-widest">Scanning Radar Frequencies...</span>
+          </div>
+        ) : data.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-gray-500 mono text-sm uppercase tracking-widest min-h-[400px]">
+            No Targets Identified On Radar
+          </div>
+        ) : (
+          <div className="overflow-auto flex-1 scrollbar-thin">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 z-20 bg-[#0b0c13] border-b border-surface-border">
+                {table.getHeaderGroups().map(headerGroup => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map(header => (
+                      <th 
+                        key={header.id} 
+                        onClick={header.column.getToggleSortingHandler()}
+                        className={clsx(
+                          "py-3 px-5 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500 bg-surface-card/80 backdrop-blur-md select-none whitespace-nowrap",
+                          header.column.getCanSort() ? "cursor-pointer hover:text-white transition-colors group" : ""
+                        )}
+                      >
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <ArrowUpDown size={12} className={clsx(
+                              "transition-opacity",
+                              header.column.getIsSorted() ? "opacity-100 text-brand" : "opacity-0 group-hover:opacity-50"
+                            )} />
+                          )}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              <tbody className="mono text-sm">
+                {table.getRowModel().rows.map(row => (
+                  <tr key={row.id} className="border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group">
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {/* Table Footer */}
+        <div className="bg-[#0b0c13] border-t border-surface-border px-5 py-2 flex justify-between items-center text-[10px] mono text-gray-600 uppercase tracking-widest shrink-0">
+          <span>{table.getRowModel().rows.length} Targets Tracking</span>
+          <span>Matrix Status: <span className="text-system-online">Active</span></span>
+        </div>
       </div>
     </div>
   )

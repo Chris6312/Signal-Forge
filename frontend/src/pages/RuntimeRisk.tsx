@@ -3,8 +3,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchRuntime, fetchMarketStatus, patchRuntime, haltTrading, resumeTrading, resetPaperData } from '@/api/endpoints'
 import type { MarketStatusResponse } from '@/api/types'
 import StatusBadge from '@/components/StatusBadge'
-import { RefreshCw, ShieldAlert, ShieldCheck, Settings, FlaskConical, Zap, Clock, Trash2 } from 'lucide-react'
-import { formatET, relativeTime } from '@/utils/time'
+import { RefreshCw, ShieldAlert, ShieldCheck, Settings, FlaskConical, Zap, Clock, Trash2, Cpu, Activity, Server } from 'lucide-react'
+import { formatET } from '@/utils/time'
+import clsx from 'clsx'
 
 interface RuntimeState {
   status: string
@@ -24,7 +25,6 @@ interface RuntimeState {
   started_at: string | null
 }
 
-/** Map raw worker status → display status for stock workers based on current market window. */
 function stockStatus(raw: string, ms: MarketStatusResponse['status']): string {
   if (ms === 'closed')     return 'paused'
   if (ms === 'pre_market') return 'pre-market'
@@ -40,10 +40,9 @@ export default function RuntimeRisk() {
   const [cryptoSeed, setCryptoSeed] = useState('')
   const [stockSeed, setStockSeed] = useState('')
   const [confirmReset, setConfirmReset] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [success, setSuccess] = useState<string | null>(null)
+  const [sysLog, setSysLog] = useState<{ message: string; type: 'error' | 'success' } | null>(null)
 
-  const { data, isLoading, refetch } = useQuery<RuntimeState>({
+  const { data, isLoading, refetch, isRefetching } = useQuery<RuntimeState>({
     queryKey: ['runtime'],
     queryFn: fetchRuntime,
     refetchInterval: 10000,
@@ -58,22 +57,27 @@ export default function RuntimeRisk() {
 
   const ms = marketData?.status ?? 'open'
 
+  const showSysLog = (message: string, type: 'error' | 'success') => {
+    setSysLog({ message, type })
+    setTimeout(() => setSysLog(null), 5000)
+  }
+
   const mutateHalt = useMutation({
     mutationFn: () => haltTrading(adminToken),
-    onSuccess: () => { setSuccess('Trading halted'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
-    onError: () => setError('Invalid admin token or request failed'),
+    onSuccess: () => { showSysLog('GLOBAL HALT INITIATED', 'success'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
+    onError: () => showSysLog('INVALID TOKEN OR UPLINK FAILURE', 'error'),
   })
 
   const mutateResume = useMutation({
     mutationFn: () => resumeTrading(adminToken),
-    onSuccess: () => { setSuccess('Trading resumed'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
-    onError: () => setError('Invalid admin token or request failed'),
+    onSuccess: () => { showSysLog('SYSTEMS RESUMED', 'success'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
+    onError: () => showSysLog('INVALID TOKEN OR UPLINK FAILURE', 'error'),
   })
 
   const mutateUpdate = useMutation({
     mutationFn: (body: object) => patchRuntime(body, adminToken),
-    onSuccess: () => { setSuccess('Settings updated'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
-    onError: () => setError('Invalid admin token or request failed'),
+    onSuccess: () => { showSysLog('CONFIG OVERRIDE ACCEPTED', 'success'); qc.invalidateQueries({ queryKey: ['runtime'] }) },
+    onError: () => showSysLog('INVALID TOKEN OR UPLINK FAILURE', 'error'),
   })
 
   const mutateReset = useMutation({
@@ -83,17 +87,14 @@ export default function RuntimeRisk() {
       parseFloat(stockSeed)  || 0,
     ),
     onSuccess: (d) => {
-      setSuccess(`Reset complete — crypto $${d.crypto_balance.toFixed(2)} | stock $${d.stock_balance.toFixed(2)}`)
+      showSysLog(`PAPER PURGE COMPLETE [ C_BAL: $${d.crypto_balance.toFixed(2)} | S_BAL: $${d.stock_balance.toFixed(2)} ]`, 'success')
       setConfirmReset(false)
-      qc.invalidateQueries({ queryKey: ['runtime'] })
-      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries()
     },
-    onError: () => setError('Reset failed — check admin token'),
+    onError: () => showSysLog('PURGE REJECTED: CHECK AUTH', 'error'),
   })
 
   const handleUpdate = () => {
-    setError(null)
-    setSuccess(null)
     const body: Record<string, number> = {}
     if (maxCrypto) body.max_crypto_positions = parseInt(maxCrypto)
     if (maxStock) body.max_stock_positions = parseInt(maxStock)
@@ -102,280 +103,290 @@ export default function RuntimeRisk() {
   }
 
   const workers = data ? [
-    { key: 'crypto_monitor',    label: 'Crypto Monitor',     status: data.crypto_monitor,                  isStock: false },
-    { key: 'stock_monitor',     label: 'Stock Monitor',      status: stockStatus(data.stock_monitor, ms),   isStock: true  },
-    { key: 'crypto_exit_worker',label: 'Crypto Exit Worker', status: data.crypto_exit_worker,              isStock: false },
-    { key: 'stock_exit_worker', label: 'Stock Exit Worker',  status: stockStatus(data.stock_exit_worker, ms), isStock: true },
-    { key: 'discord_listener',  label: 'Discord Listener',   status: data.discord_listener,                isStock: false },
+    { key: 'crypto_monitor',    label: 'CRYPTO_MON',     status: data.crypto_monitor,                  isStock: false },
+    { key: 'stock_monitor',     label: 'STOCK_MON',      status: stockStatus(data.stock_monitor, ms),   isStock: true  },
+    { key: 'crypto_exit_worker',label: 'CRYPTO_EXIT',    status: data.crypto_exit_worker,              isStock: false },
+    { key: 'stock_exit_worker', label: 'STOCK_EXIT',     status: stockStatus(data.stock_exit_worker, ms), isStock: true },
+    { key: 'discord_listener',  label: 'DISCORD_IO',     status: data.discord_listener,                isStock: false },
   ] : []
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold text-white">Runtime & Risk</h1>
-          <p className="text-sm text-gray-500 mt-1">System controls and safety configuration</p>
+          <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+            <Cpu className="text-brand" /> 
+            Engine Config
+          </h1>
+          <div className="flex items-center gap-3 mt-2 mono text-xs text-gray-500">
+            <span>RUNTIME_PARAMETERS</span>
+            <span>|</span>
+            <span className="text-brand">SYSTEM_LEVEL_ACCESS</span>
+          </div>
         </div>
-        <button onClick={() => refetch()} className="btn-ghost flex items-center gap-1.5">
-          <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
+            <span className="mono text-xs uppercase tracking-wider">Sync State</span>
+          </button>
+        </div>
       </div>
 
-      {error && (
-        <div className="card border-red-500/30 bg-red-500/10 text-red-400 text-sm">{error}</div>
-      )}
-      {success && (
-        <div className="card border-emerald-500/30 bg-emerald-500/10 text-emerald-400 text-sm">{success}</div>
+      {/* Ephemeral System Messages */}
+      {sysLog && (
+        <div className={clsx(
+          "px-4 py-3 rounded-lg border flex items-center gap-3 font-mono text-xs uppercase tracking-widest shadow-card-inset animate-in fade-in slide-in-from-top-2 duration-300",
+          sysLog.type === 'error' ? "bg-system-offline/10 border-system-offline text-system-offline drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]" : "bg-system-online/10 border-system-online text-system-online drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+        )}>
+          {sysLog.type === 'error' ? <ShieldAlert size={16} /> : <ShieldCheck size={16} />}
+          {sysLog.message}
+        </div>
       )}
 
-      {/* System Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="card space-y-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wider font-medium flex items-center gap-2">
-            <Settings size={12} />
-            System Status
-          </div>
-          {isLoading ? (
-            <div className="text-gray-500 text-sm">Loading…</div>
-          ) : data ? (
-            <div className="space-y-3 text-sm">
-              <Row label="Status" value={<StatusBadge status={data.status} />} />
-              <Row label="Mode" value={
-                <span className={`text-sm font-semibold flex items-center gap-1.5 ${
-                  data.trading_mode === 'live' ? 'text-emerald-400' : 'text-amber-400'
-                }`}>
-                  {data.trading_mode === 'live' ? <Zap size={13} /> : <FlaskConical size={13} />}
-                  {data.trading_mode?.toUpperCase() ?? 'PAPER'}
-                </span>
-              } />
-              <Row label="Risk / Trade" value={<span className="mono text-white">{((data.risk_per_trade_pct ?? 0.02) * 100).toFixed(1)}%</span>} />
-              <Row label="Trading" value={<StatusBadge status={data.trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
-              <Row label="Crypto Trading" value={<StatusBadge status={data.crypto_trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
-              <Row label="Stock Trading" value={<StatusBadge status={
-                !data.stock_trading_enabled ? 'INACTIVE'
-                : ms === 'closed'     ? 'paused'
-                : ms === 'pre_market' ? 'pre-market'
-                : ms === 'eod'        ? 'eod'
-                : 'ACTIVE'
-              } />} />
-              <Row label="Max Crypto Positions" value={<span className="mono text-white">{data.max_crypto_positions}</span>} />
-              <Row label="Max Stock Positions" value={<span className="mono text-white">{data.max_stock_positions}</span>} />
-              {data.started_at && (
-                <Row label="Started" value={<span className="text-gray-400 text-xs" title={relativeTime(data.started_at)}>{formatET(data.started_at)}</span>} />
-              )}
-              {data.last_heartbeat && (
-                <Row label="Last Heartbeat" value={<span className="text-gray-400 text-xs" title={relativeTime(data.last_heartbeat)}>{formatET(data.last_heartbeat)}</span>} />
-              )}
+      {/* Grid Layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        
+        {/* Core Telemetry Panel */}
+        <div className="card space-y-4 relative overflow-hidden group">
+          <div className="absolute inset-0 bg-gradient-to-br from-brand/5 to-surface opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
+          <div className="text-xs text-brand mono font-bold uppercase tracking-widest flex items-center justify-between border-b border-surface-border pb-3 relative z-10">
+            <div className="flex items-center gap-2">
+              <Settings size={14} /> Core Telemetry
             </div>
-          ) : null}
+            {isLoading && <Activity size={14} className="animate-pulse" />}
+          </div>
+          
+          <div className="space-y-4 relative z-10">
+            <Row label="Master Engine" value={<StatusBadge status={data?.status ?? 'UNKNOWN'} />} />
+            
+            <Row label="Operation Mode" value={
+              <span className={clsx(
+                "text-xs font-mono font-bold tracking-widest uppercase flex items-center gap-1.5 border px-2 py-0.5 rounded shadow-card-inset",
+                data?.trading_mode === 'live' 
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.2)]' 
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+              )}>
+                {data?.trading_mode === 'live' ? <Zap size={12} /> : <FlaskConical size={12} />}
+                {data?.trading_mode ?? 'PAPER'}
+              </span>
+            } />
+            
+            <Row label="Risk Threshold (Per Vector)" value={<span className="mono text-white bg-[#12141f] border border-surface-border px-2 py-0.5 rounded shadow-card-inset">{((data?.risk_per_trade_pct ?? 0.02) * 100).toFixed(1)}%</span>} />
+            <Row label="Global Trading" value={<StatusBadge status={data?.trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
+            <Row label="Node_A Execution (Crypto)" value={<StatusBadge status={data?.crypto_trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
+            
+            <Row label="Node_B Execution (Stock)" value={<StatusBadge status={
+              !data?.stock_trading_enabled ? 'INACTIVE'
+              : ms === 'closed'     ? 'paused'
+              : ms === 'pre_market' ? 'pre-market'
+              : ms === 'eod'        ? 'eod'
+              : 'ACTIVE'
+            } />} />
+            
+            <div className="grid grid-cols-2 gap-4 pt-2">
+              <div className="bg-[#12141f] border border-surface-border rounded-lg p-3 text-center shadow-card-inset">
+                <div className="text-[10px] text-gray-500 mono uppercase mb-1">Max Crypto Vectors</div>
+                <div className="text-xl font-mono text-white drop-shadow-[0_0_5px_rgba(255,255,255,0.5)]">{data?.max_crypto_positions ?? '--'}</div>
+              </div>
+              <div className="bg-[#12141f] border border-surface-border rounded-lg p-3 text-center shadow-card-inset">
+                <div className="text-[10px] text-gray-500 mono uppercase mb-1">Max Stock Vectors</div>
+                <div className="text-xl font-mono text-white drop-shadow-[0_0_5px_rgba(255,255,255,0.5)]">{data?.max_stock_positions ?? '--'}</div>
+              </div>
+            </div>
+
+            {data?.last_heartbeat && (
+              <div className="flex items-center justify-between text-[10px] mono text-gray-600 border-t border-surface-border pt-3">
+                <span>LAST_UPLINK_HEARTBEAT</span>
+                <span className="text-brand flex items-center gap-1"><Activity size={10} className="animate-pulse" /> {formatET(data.last_heartbeat)}</span>
+              </div>
+            )}
+          </div>
         </div>
 
-        <div className="card space-y-4">
-          <div className="text-xs text-gray-400 uppercase tracking-wider font-medium">Worker Status</div>
+        {/* Worker Node Status Rack */}
+        <div className="card space-y-4 bg-[#0d0f18] border-brand/20 shadow-card-inset flex flex-col">
+          <div className="text-xs text-gray-400 mono font-bold uppercase tracking-widest flex items-center gap-2 border-b border-surface-border pb-3">
+            <Server size={14} /> Active Node Rack
+          </div>
 
-          {/* Market-hours context banners */}
+          {/* Market Window Alerts */}
           {ms === 'closed' && (
-            <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-500/10 border border-slate-500/20 rounded-lg px-3 py-2">
-              <Clock size={12} className="shrink-0" />
-              <span>Stock workers paused — NYSE closed.&nbsp;
-                <span className="font-mono">{marketData?.is_trading_day ? 'Resumes 9:15 AM ET' : 'Next trading day 9:15 AM ET'}</span>
-              </span>
+            <div className="flex items-center gap-3 text-[10px] mono text-slate-400 bg-slate-500/10 border border-slate-500/30 rounded-lg px-4 py-2.5 uppercase tracking-widest shadow-card-inset shrink-0">
+              <Clock size={14} className="shrink-0 text-slate-300" />
+              <span>Node_B (Stock) Paused. <span className="text-white ml-2">[{marketData?.is_trading_day ? 'Resumes 09:15 ET' : 'Next Day 09:15 ET'}]</span></span>
             </div>
           )}
           {ms === 'pre_market' && (
-            <div className="flex items-center gap-2 text-xs text-sky-400 bg-sky-500/10 border border-sky-500/20 rounded-lg px-3 py-2">
-              <Clock size={12} className="shrink-0" />
-              Pre-market window — candles loading, signals prepping.
-              <span className="font-mono ml-auto">Entries open 9:30 AM ET</span>
+            <div className="flex items-center gap-3 text-[10px] mono text-sky-400 bg-sky-500/10 border border-sky-500/30 rounded-lg px-4 py-2.5 uppercase tracking-widest shadow-card-inset shrink-0">
+              <Activity size={14} className="shrink-0 text-sky-300 animate-pulse" />
+              <span>Pre-Market Analysis. <span className="text-white ml-2">[Entries unlock 09:30 ET]</span></span>
             </div>
           )}
           {ms === 'eod' && (
-            <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
-              <Clock size={12} className="shrink-0" />
-              EOD window — stock entries blocked, exits active.
-              <span className="font-mono ml-auto">Closes 4:00 PM ET</span>
+            <div className="flex items-center gap-3 text-[10px] mono text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2.5 uppercase tracking-widest shadow-card-inset shrink-0">
+              <ShieldAlert size={14} className="shrink-0 text-amber-300" />
+              <span>EOD Window Active. Entries Blocked. <span className="text-white ml-2">[Closes 16:00 ET]</span></span>
             </div>
           )}
 
-          <div className="space-y-2">
-            {workers.map(w => (
-              <div key={w.key} className="flex items-center justify-between text-sm">
-                <span className={w.isStock && ms !== 'open' ? 'text-gray-500' : 'text-gray-400'}>
-                  {w.label}
-                </span>
-                <StatusBadge status={w.status} />
+          <div className="flex-1 flex flex-col gap-2.5 justify-center">
+            {workers.map(w => {
+              const isOnline = w.status === 'online' || w.status === 'running'
+              return (
+                <div key={w.key} className={clsx(
+                  "flex items-center justify-between p-3 rounded-lg border transition-all",
+                  isOnline ? "bg-system-online/5 border-system-online/20" : "bg-surface border-surface-border"
+                )}>
+                  <div className="flex items-center gap-3">
+                    <Server size={14} className={isOnline ? 'text-system-online drop-shadow-[0_0_5px_rgba(16,185,129,0.8)]' : 'text-gray-600'} />
+                    <span className={clsx("text-xs font-mono font-bold tracking-widest uppercase", w.isStock && ms !== 'open' ? 'text-gray-500' : 'text-gray-300')}>
+                      {w.label}
+                    </span>
+                  </div>
+                  <StatusBadge status={w.status} />
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Command Controls */}
+        <div className="lg:col-span-2 card space-y-6 border-brand/40 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.05),0_0_30px_-10px_rgba(99,102,241,0.15)] relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none">
+            <ShieldAlert size={100} />
+          </div>
+          
+          <div className="text-xs text-brand mono font-bold uppercase tracking-widest flex items-center gap-2 border-b border-surface-border pb-3 relative z-10">
+            <ShieldAlert size={14} /> Master Command Console
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 relative z-10">
+            
+            {/* Auth Input */}
+            <div className="md:col-span-3 lg:col-span-1 space-y-4">
+              <div className="space-y-1.5">
+                <label className="text-[10px] text-gray-500 mono uppercase tracking-widest block">Authorization Required</label>
+                <input
+                  type="password"
+                  value={adminToken}
+                  onChange={e => setAdminToken(e.target.value)}
+                  placeholder="Enter x-admin-token"
+                  className="bg-[#0b0c13] border border-brand/50 rounded py-2.5 px-4 text-white font-mono text-sm focus:outline-none focus:ring-1 focus:ring-brand shadow-[0_0_10px_rgba(99,102,241,0.2)] w-full transition-all"
+                  autoComplete="off"
+                />
               </div>
-            ))}
-          </div>
-        </div>
-      </div>
 
-      {/* Controls */}
-      <div className="card space-y-5">
-        <div className="text-xs text-gray-400 uppercase tracking-wider font-medium flex items-center gap-2">
-          <ShieldAlert size={12} />
-          Admin Controls
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-500">Admin Token</label>
-          <input
-            type="password"
-            value={adminToken}
-            onChange={e => setAdminToken(e.target.value)}
-            placeholder="Enter admin token"
-            className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm mono text-white focus:outline-none focus:border-brand w-72"
-          />
-        </div>
-
-        {/* Halt / Resume */}
-        <div className="flex gap-3 flex-wrap">
-          <button
-            onClick={() => { setError(null); setSuccess(null); mutateHalt.mutate() }}
-            disabled={!adminToken || mutateHalt.isPending}
-            className="flex items-center gap-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40"
-          >
-            <ShieldAlert size={14} />
-            {mutateHalt.isPending ? 'Halting…' : 'Halt All Trading'}
-          </button>
-          <button
-            onClick={() => { setError(null); setSuccess(null); mutateResume.mutate() }}
-            disabled={!adminToken || mutateResume.isPending}
-            className="flex items-center gap-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-600/30 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40"
-          >
-            <ShieldCheck size={14} />
-            {mutateResume.isPending ? 'Resuming…' : 'Resume Trading'}
-          </button>
-        </div>
-
-        {/* Paper / Live mode */}
-        <div className="border-t border-surface-border pt-5 space-y-3">
-          <div className="text-xs text-gray-500">Trading Mode</div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => { setError(null); setSuccess(null); mutateUpdate.mutate({ trading_mode: 'paper' }) }}
-              disabled={!adminToken || mutateUpdate.isPending || data?.trading_mode === 'paper'}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
-                data?.trading_mode === 'paper'
-                  ? 'bg-amber-500/20 text-amber-400 border-amber-500/30 cursor-default'
-                  : 'bg-surface text-gray-400 border-surface-border hover:text-white disabled:opacity-40'
-              }`}
-            >
-              <FlaskConical size={14} />
-              Paper
-            </button>
-            <button
-              onClick={() => { setError(null); setSuccess(null); mutateUpdate.mutate({ trading_mode: 'live' }) }}
-              disabled={!adminToken || mutateUpdate.isPending || data?.trading_mode === 'live'}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
-                data?.trading_mode === 'live'
-                  ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 cursor-default'
-                  : 'bg-surface text-gray-400 border-surface-border hover:text-white disabled:opacity-40'
-              }`}
-            >
-              <Zap size={14} />
-              Live
-            </button>
-          </div>
-        </div>
-
-        {/* Settings */}
-        <div className="border-t border-surface-border pt-5 space-y-4">
-          <div className="text-xs text-gray-500">Position Limits</div>
-          <div className="flex gap-4 flex-wrap items-end">
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-500">Max Crypto Positions</label>
-              <input
-                type="number"
-                value={maxCrypto}
-                onChange={e => setMaxCrypto(e.target.value)}
-                placeholder={String(data?.max_crypto_positions ?? 5)}
-                className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm mono text-white focus:outline-none focus:border-brand w-28"
-              />
+              {/* Master Halt / Resume */}
+              <div className="space-y-2">
+                <label className="text-[10px] text-gray-500 mono uppercase tracking-widest block">Global Execution Switch</label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => mutateHalt.mutate()}
+                    disabled={!adminToken || mutateHalt.isPending}
+                    className="flex-1 flex items-center justify-center gap-2 bg-system-offline/20 hover:bg-system-offline/40 text-system-offline border border-system-offline/50 py-2 rounded text-xs font-mono font-bold tracking-widest transition-all disabled:opacity-30 shadow-[0_0_15px_-5px_rgba(239,68,68,0.4)] hover:shadow-[0_0_20px_rgba(239,68,68,0.6)] uppercase"
+                  >
+                    {mutateHalt.isPending ? <Activity size={14} className="animate-pulse" /> : <ShieldAlert size={14} />}
+                    Halt All
+                  </button>
+                  <button
+                    onClick={() => mutateResume.mutate()}
+                    disabled={!adminToken || mutateResume.isPending}
+                    className="flex-1 flex items-center justify-center gap-2 bg-system-online/20 hover:bg-system-online/40 text-system-online border border-system-online/50 py-2 rounded text-xs font-mono font-bold tracking-widest transition-all disabled:opacity-30 shadow-[0_0_15px_-5px_rgba(16,185,129,0.4)] hover:shadow-[0_0_20px_rgba(16,185,129,0.6)] uppercase"
+                  >
+                    {mutateResume.isPending ? <Activity size={14} className="animate-pulse" /> : <ShieldCheck size={14} />}
+                    Resume
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-500">Max Stock Positions</label>
-              <input
-                type="number"
-                value={maxStock}
-                onChange={e => setMaxStock(e.target.value)}
-                placeholder={String(data?.max_stock_positions ?? 5)}
-                className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm mono text-white focus:outline-none focus:border-brand w-28"
-              />
-            </div>
-            <button
-              onClick={handleUpdate}
-              disabled={!adminToken || mutateUpdate.isPending}
-              className="btn-primary disabled:opacity-40"
-            >
-              {mutateUpdate.isPending ? 'Saving…' : 'Save Settings'}
-            </button>
-          </div>
-        </div>
 
-        {/* Reset Paper Data */}
-        <div className="border-t border-surface-border pt-5 space-y-3">
-          <div className="text-xs text-red-400 uppercase tracking-wider font-medium flex items-center gap-2">
-            <Trash2 size={12} />
-            Danger Zone — Reset Paper Data
-          </div>
-          <p className="text-xs text-gray-500">
-            Permanently deletes all positions, orders, ledger entries and audit events.
-            Watchlist is preserved. Set seed balances below (leave blank to start at $0).
-          </p>
-          <div className="flex gap-4 flex-wrap items-end">
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-500">Crypto Seed ($)</label>
-              <input
-                type="number"
-                min="0"
-                value={cryptoSeed}
-                onChange={e => setCryptoSeed(e.target.value)}
-                placeholder="0.00"
-                className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm mono text-white focus:outline-none focus:border-brand w-28"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-500">Stock Seed ($)</label>
-              <input
-                type="number"
-                min="0"
-                value={stockSeed}
-                onChange={e => setStockSeed(e.target.value)}
-                placeholder="0.00"
-                className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm mono text-white focus:outline-none focus:border-brand w-28"
-              />
+            <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6 pl-0 md:pl-6 border-t md:border-t-0 md:border-l border-surface-border pt-6 md:pt-0">
+              
+              {/* Configuration Override */}
+              <div className="space-y-4">
+                <label className="text-[10px] text-gray-500 mono uppercase tracking-widest block">Parameter Override</label>
+                
+                <div className="bg-[#12141f] border border-surface-border rounded p-3 space-y-3 shadow-card-inset">
+                  <div className="flex gap-2 bg-surface p-1 rounded border border-surface-border">
+                    <button
+                      onClick={() => mutateUpdate.mutate({ trading_mode: 'paper' })}
+                      disabled={!adminToken || mutateUpdate.isPending || data?.trading_mode === 'paper'}
+                      className={clsx(
+                        "flex-1 flex items-center justify-center gap-2 py-1.5 rounded text-[10px] font-mono uppercase tracking-widest transition-all",
+                        data?.trading_mode === 'paper' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'text-gray-500 hover:text-gray-300 disabled:opacity-30'
+                      )}
+                    >
+                      <FlaskConical size={12} /> Paper
+                    </button>
+                    <button
+                      onClick={() => mutateUpdate.mutate({ trading_mode: 'live' })}
+                      disabled={!adminToken || mutateUpdate.isPending || data?.trading_mode === 'live'}
+                      className={clsx(
+                        "flex-1 flex items-center justify-center gap-2 py-1.5 rounded text-[10px] font-mono uppercase tracking-widest transition-all",
+                        data?.trading_mode === 'live' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'text-gray-500 hover:text-gray-300 disabled:opacity-30'
+                      )}
+                    >
+                      <Zap size={12} /> Live
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-gray-500 mono">MAX_CRYPTO</label>
+                      <input type="number" value={maxCrypto} onChange={e => setMaxCrypto(e.target.value)} placeholder={String(data?.max_crypto_positions ?? 5)} className="w-full bg-surface border border-surface-border rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-brand transition-all" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-gray-500 mono">MAX_STOCK</label>
+                      <input type="number" value={maxStock} onChange={e => setMaxStock(e.target.value)} placeholder={String(data?.max_stock_positions ?? 5)} className="w-full bg-surface border border-surface-border rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-brand transition-all" />
+                    </div>
+                  </div>
+                  
+                  <button onClick={handleUpdate} disabled={!adminToken || mutateUpdate.isPending} className="w-full btn-primary py-1.5 text-xs font-mono uppercase tracking-widest disabled:opacity-30">
+                    Apply Override
+                  </button>
+                </div>
+              </div>
+
+              {/* Danger Zone: Purge Data */}
+              <div className="space-y-4">
+                <label className="text-[10px] text-system-offline mono uppercase tracking-widest flex items-center gap-1.5"><Trash2 size={12}/> Critical: Data Purge</label>
+                
+                <div className="bg-system-offline/5 border border-system-offline/20 rounded p-3 space-y-3 relative overflow-hidden group">
+                  <div className="absolute inset-0 opacity-10 bg-[repeating-linear-gradient(45deg,transparent,transparent_8px,#ef4444_8px,#ef4444_16px)] pointer-events-none group-hover:opacity-20 transition-opacity"></div>
+                  
+                  <p className="text-[9px] text-red-300/80 mono uppercase leading-tight relative z-10">Permanently clears ledger, orders, and audit. Seeds below.</p>
+                  
+                  <div className="grid grid-cols-2 gap-2 relative z-10">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-red-400 mono">SEED_CRYPTO ($)</label>
+                      <input type="number" min="0" value={cryptoSeed} onChange={e => setCryptoSeed(e.target.value)} placeholder="0.00" className="w-full bg-surface border border-red-500/30 rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-red-500 transition-all" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-red-400 mono">SEED_STOCK ($)</label>
+                      <input type="number" min="0" value={stockSeed} onChange={e => setStockSeed(e.target.value)} placeholder="0.00" className="w-full bg-surface border border-red-500/30 rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-red-500 transition-all" />
+                    </div>
+                  </div>
+                  
+                  {!confirmReset ? (
+                    <button onClick={() => setConfirmReset(true)} disabled={!adminToken} className="w-full py-1.5 text-[10px] font-mono font-bold tracking-widest uppercase text-system-offline border border-system-offline/30 hover:bg-system-offline hover:text-white transition-all rounded disabled:opacity-30 relative z-10 bg-[#0b0c13]">
+                      Initiate Purge Sequence
+                    </button>
+                  ) : (
+                    <div className="flex gap-2 relative z-10">
+                      <button onClick={() => mutateReset.mutate()} disabled={mutateReset.isPending} className="flex-1 py-1.5 text-[10px] font-mono font-bold tracking-widest uppercase text-white bg-system-offline hover:bg-red-600 transition-all rounded disabled:opacity-30 shadow-[0_0_15px_rgba(239,68,68,0.5)]">
+                        {mutateReset.isPending ? 'Purging...' : 'Confirm Purge'}
+                      </button>
+                      <button onClick={() => setConfirmReset(false)} className="px-3 py-1.5 text-[10px] font-mono tracking-widest uppercase text-gray-400 hover:text-white bg-surface border border-surface-border rounded">
+                        Abort
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+              
             </div>
           </div>
-          {!confirmReset ? (
-            <button
-              onClick={() => setConfirmReset(true)}
-              disabled={!adminToken}
-              className="flex items-center gap-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/30 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40"
-            >
-              <Trash2 size={14} />
-              Reset All Paper Data
-            </button>
-          ) : (
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xs text-red-400">This cannot be undone. Are you sure?</span>
-              <button
-                onClick={() => { setError(null); setSuccess(null); mutateReset.mutate() }}
-                disabled={mutateReset.isPending}
-                className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40"
-              >
-                <Trash2 size={14} />
-                {mutateReset.isPending ? 'Resetting…' : 'Yes, Reset Everything'}
-              </button>
-              <button
-                onClick={() => setConfirmReset(false)}
-                className="text-xs text-gray-500 hover:text-white transition-colors px-2 py-1"
-              >
-                Cancel
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -384,9 +395,11 @@ export default function RuntimeRisk() {
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-gray-500">{label}</span>
-      {value}
+    <div className="flex justify-between items-center group">
+      <span className="text-gray-500 mono text-xs uppercase tracking-wider group-hover:text-gray-400 transition-colors">{label}</span>
+      <div className="text-right">
+        {value}
+      </div>
     </div>
   )
 }

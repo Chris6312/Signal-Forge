@@ -1,8 +1,18 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getSortedRowModel,
+  getFilteredRowModel,
+  useReactTable,
+  SortingState,
+} from '@tanstack/react-table'
 import { fetchMonitoringCandidates, evaluateSymbol } from '@/api/endpoints'
 import StatusBadge from '@/components/StatusBadge'
-import { RefreshCw, Search, ChevronRight } from 'lucide-react'
+import { RefreshCw, Search, Activity, Crosshair, TerminalSquare, ArrowUpDown, ChevronRight, Zap } from 'lucide-react'
+import clsx from 'clsx'
 
 interface Candidate {
   symbol: string
@@ -33,8 +43,13 @@ interface EvalResult {
   error?: string
 }
 
+const columnHelper = createColumnHelper<Candidate>()
+
 export default function Monitoring() {
   const [filterClass, setFilterClass] = useState<string>('')
+  const [globalFilter, setGlobalFilter] = useState('')
+  const [sorting, setSorting] = useState<SortingState>([{ id: 'top_confidence', desc: true }])
+  
   const [evalSymbol, setEvalSymbol] = useState('')
   const [evalClass, setEvalClass] = useState<'crypto' | 'stock'>('crypto')
   const [evalResult, setEvalResult] = useState<EvalResult | null>(null)
@@ -43,168 +58,326 @@ export default function Monitoring() {
   const params: Record<string, string> = {}
   if (filterClass) params.asset_class = filterClass
 
-  const { data, isLoading, refetch } = useQuery<{ candidates: Candidate[]; total: number }>({
+  const { data, isLoading, isRefetching, refetch } = useQuery<{ candidates: Candidate[]; total: number }>({
     queryKey: ['monitoring', filterClass],
     queryFn: () => fetchMonitoringCandidates(params),
     refetchInterval: 30000,
   })
 
-  const handleEvaluate = async () => {
-    if (!evalSymbol.trim()) return
+  const handleEvaluate = async (targetSymbol?: string, targetClass?: 'crypto' | 'stock') => {
+    const sym = targetSymbol || evalSymbol
+    const cls = targetClass || evalClass
+    
+    if (!sym.trim()) return
+    
+    setEvalSymbol(sym.toUpperCase())
+    setEvalClass(cls)
     setEvalLoading(true)
     setEvalResult(null)
+    
     try {
-      const result = await evaluateSymbol(evalSymbol.trim().toUpperCase(), evalClass)
+      const result = await evaluateSymbol(sym.trim().toUpperCase(), cls)
       setEvalResult(result)
     } catch {
-      setEvalResult({ symbol: evalSymbol, asset_class: evalClass, signals: [], error: 'Request failed' })
+      setEvalResult({ symbol: sym, asset_class: cls, signals: [], error: 'Uplink to analysis engine failed.' })
     } finally {
       setEvalLoading(false)
     }
   }
 
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-white">Monitoring</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {data?.total ?? 0} candidates in active watchlist
-          </p>
+  const columns = useMemo(() => [
+    columnHelper.accessor('symbol', {
+      header: 'TARGET_VECTOR',
+      cell: info => (
+        <div className="flex items-center gap-2">
+          <div className={clsx(
+            "w-1.5 h-1.5 rounded-full shadow-[0_0_5px_currentColor]",
+            info.row.original.asset_class === 'crypto' ? 'text-[#5865F2] bg-[#5865F2]' : 'text-system-online bg-system-online'
+          )}></div>
+          <span className="font-bold tracking-wider text-white">{info.getValue()}</span>
         </div>
-        <button onClick={() => refetch()} className="btn-ghost flex items-center gap-1.5">
-          <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
-          Refresh
+      ),
+    }),
+    columnHelper.accessor('asset_class', {
+      header: 'NODE',
+      cell: info => <span className="text-xs text-gray-400 uppercase tracking-widest">{info.getValue()}</span>
+    }),
+    columnHelper.accessor('state', {
+      header: 'SYS_STATE',
+      cell: info => <StatusBadge status={info.getValue()} />,
+    }),
+    columnHelper.accessor('top_strategy', {
+      header: 'PRIMARY_ALGO',
+      cell: info => {
+        const val = info.getValue()
+        if (!val) return <span className="text-gray-600 mono text-xs">—</span>
+        return <span className="text-xs font-mono font-medium text-gray-300 uppercase tracking-wider bg-surface-card border border-surface-border px-2 py-0.5 rounded">{val}</span>
+      }
+    }),
+    columnHelper.accessor('top_confidence', {
+      header: 'CONFIDENCE',
+      cell: info => {
+        const val = info.getValue()
+        if (val == null) return <span className="text-gray-600 mono text-xs">—</span>
+        return (
+          <span className={clsx(
+            "mono font-bold drop-shadow-[0_0_5px_currentColor]",
+            val >= 0.8 ? "text-system-online" : val >= 0.5 ? "text-brand" : "text-system-warning"
+          )}>
+            {(val * 100).toFixed(0)}%
+          </span>
+        )
+      }
+    }),
+    columnHelper.accessor('added_at', {
+      header: 'TRACKING_SINCE',
+      cell: info => {
+        const val = info.getValue()
+        return <span className="text-xs text-gray-400 mono">{val ? new Date(val).toLocaleDateString() : '—'}</span>
+      }
+    }),
+    columnHelper.display({
+      id: 'actions',
+      header: 'OPERATIONS',
+      cell: info => (
+        <button
+          onClick={() => handleEvaluate(info.row.original.symbol, info.row.original.asset_class as 'crypto' | 'stock')}
+          className="text-xs font-mono font-bold tracking-widest uppercase text-brand hover:text-white transition-colors flex items-center gap-1 bg-brand/10 hover:bg-brand/20 border border-brand/30 px-2 py-1 rounded"
+        >
+          Ping <ChevronRight size={12} />
         </button>
-      </div>
+      )
+    })
+  ], [])
 
-      {/* Filter */}
-      <div className="flex gap-3">
-        {['', 'crypto', 'stock'].map(c => (
-          <button
-            key={c}
-            onClick={() => setFilterClass(c)}
-            className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
-              filterClass === c ? 'bg-brand text-white' : 'bg-surface-card text-gray-400 hover:text-white'
-            }`}
-          >
-            {c || 'All'}
+  const table = useReactTable({
+    data: data?.candidates ?? [],
+    columns,
+    state: { sorting, globalFilter },
+    onSortingChange: setSorting,
+    onGlobalFilterChange: setGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+  })
+
+  return (
+    <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0">
+        <div>
+          <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
+            <Activity className="text-brand" /> 
+            Live Telemetry
+          </h1>
+          <div className="flex items-center gap-3 mt-2 mono text-xs text-gray-500">
+            <span>ACTIVE_CANDIDATES: <span className="text-white">{data?.total ?? 0}</span></span>
+            <span>|</span>
+            <span className="text-system-online animate-pulse">MONITORING_NODES_ONLINE</span>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-3">
+          <div className="relative group hidden md:block">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-brand transition-colors" />
+            <input
+              type="text"
+              value={globalFilter ?? ''}
+              onChange={e => setGlobalFilter(e.target.value)}
+              placeholder="Search telemetry..."
+              className="bg-[#12141f] border border-surface-border rounded-lg py-1.5 pl-9 pr-4 text-white font-mono text-sm focus:outline-none focus:border-brand/50 focus:ring-1 focus:ring-brand/50 w-48 transition-all"
+            />
+          </div>
+          <div className="w-[1px] h-6 bg-surface-border"></div>
+          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
+            <span className="mono text-xs uppercase tracking-wider">Sync Telemetry</span>
           </button>
-        ))}
+        </div>
       </div>
 
-      {/* Candidates */}
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-surface-border text-xs text-gray-500 uppercase tracking-wider">
-              <th className="text-left px-5 py-3">Symbol</th>
-              <th className="text-left px-5 py-3">Asset Class</th>
-              <th className="text-left px-5 py-3">State</th>
-              <th className="text-left px-5 py-3">Top Strategy</th>
-              <th className="text-left px-5 py-3">Added</th>
-              <th className="px-5 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-gray-500">Loading…</td></tr>
+      {/* On-Demand Analysis Console */}
+      <div className="card space-y-4 bg-[#0d0f18] shrink-0 border-brand/20 shadow-card-inset">
+        <div className="flex flex-col md:flex-row md:items-end gap-4">
+          <div className="flex-1 space-y-3">
+            <div className="text-xs text-brand mono font-bold uppercase tracking-widest flex items-center gap-2">
+              <TerminalSquare size={14} /> On-Demand Telemetry Ping
+            </div>
+            <div className="flex gap-3 flex-wrap">
+              <div className="relative">
+                <Crosshair size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+                <input
+                  type="text"
+                  placeholder="Target (e.g. XBTUSD)"
+                  value={evalSymbol}
+                  onChange={e => setEvalSymbol(e.target.value.toUpperCase())}
+                  onKeyDown={e => e.key === 'Enter' && handleEvaluate()}
+                  className="bg-[#12141f] border border-surface-border rounded-lg pl-9 pr-4 py-2 text-sm text-white focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand mono w-56 transition-all uppercase"
+                  spellCheck="false"
+                />
+              </div>
+              <select
+                value={evalClass}
+                onChange={e => setEvalClass(e.target.value as 'crypto' | 'stock')}
+                className="bg-[#12141f] border border-surface-border rounded-lg px-4 py-2 text-sm text-white font-mono focus:outline-none focus:border-brand focus:ring-1 focus:ring-brand transition-all uppercase tracking-widest"
+              >
+                <option value="crypto">Node_A (Crypto)</option>
+                <option value="stock">Node_B (Stock)</option>
+              </select>
+              <button
+                onClick={() => handleEvaluate()}
+                disabled={evalLoading || !evalSymbol.trim()}
+                className="btn-primary flex items-center gap-2 px-6"
+              >
+                {evalLoading ? <Activity size={14} className="animate-pulse" /> : <Zap size={14} />}
+                <span className="mono font-bold tracking-widest uppercase text-xs">Execute Ping</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Evaluation Results Render */}
+        {evalResult && (
+          <div className="pt-4 border-t border-surface-border animate-in fade-in slide-in-from-top-2 duration-300">
+            {evalResult.error && (
+              <div className="bg-system-offline/10 border border-system-offline/30 text-system-offline mono text-xs p-3 rounded uppercase tracking-widest flex items-center gap-2 shadow-card-inset">
+                <Activity size={14} /> [ERR] {evalResult.error}
+              </div>
             )}
-            {!isLoading && !data?.candidates.length && (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-gray-500">No active candidates</td></tr>
+            
+            {evalResult.signals.length === 0 && !evalResult.error && (
+              <div className="bg-surface-card border border-surface-border text-gray-400 mono text-xs p-3 rounded uppercase tracking-widest flex items-center gap-2 shadow-card-inset">
+                <Crosshair size={14} /> Target {evalResult.symbol} scanned. No valid entry vectors identified.
+              </div>
             )}
-            {data?.candidates.map(c => (
-              <tr key={c.symbol + c.asset_class} className="border-b border-surface-border/50 table-row-hover">
-                <td className="px-5 py-3 mono font-medium text-white">{c.symbol}</td>
-                <td className="px-5 py-3">
-                  <span className={`badge ${c.asset_class === 'crypto' ? 'bg-violet-500/20 text-violet-400 border border-violet-500/30' : 'bg-sky-500/20 text-sky-400 border border-sky-500/30'}`}>
-                    {c.asset_class}
-                  </span>
-                </td>
-                <td className="px-5 py-3"><StatusBadge status={c.state} /></td>
-                <td className="px-5 py-3">
-                  {c.top_strategy ? (
-                    <div>
-                      <div className="text-xs font-medium text-white">{c.top_strategy}</div>
-                      <div className="text-xs mono text-brand">
-                        {c.top_confidence != null ? `${(c.top_confidence * 100).toFixed(0)}% conf` : ''}
+
+            {evalResult.signals.length > 0 && (
+              <div className="space-y-3">
+                <div className="text-[10px] text-gray-500 mono uppercase tracking-widest">Valid Vectors Identified ({evalResult.signals.length})</div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {evalResult.signals.map((sig, i) => (
+                    <div key={i} className="bg-[#12141f] rounded-lg border border-system-online/30 p-4 space-y-3 shadow-[inset_0_0_20px_rgba(16,185,129,0.05),0_0_15px_-5px_rgba(16,185,129,0.15)] relative overflow-hidden group">
+                      <div className="absolute top-0 left-0 w-1 h-full bg-system-online shadow-[0_0_10px_rgba(16,185,129,0.8)]"></div>
+                      
+                      <div className="flex items-center justify-between pl-2">
+                        <span className="font-bold text-white font-mono uppercase tracking-widest text-sm flex items-center gap-2">
+                          <Zap size={14} className="text-system-online" /> {sig.strategy}
+                        </span>
+                        <span className="text-xs mono font-bold text-system-online border border-system-online/30 bg-system-online/10 px-2 py-0.5 rounded">
+                          {(sig.confidence * 100).toFixed(0)}% CONF
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-2 pl-2 border-t border-surface-border/50 pt-3">
+                        <MetricBlock label="ENTRY" value={sig.entry_price} color="text-white" />
+                        <MetricBlock label="STOP" value={sig.stop} color="text-system-offline drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]" />
+                        <MetricBlock label="TGT_1" value={sig.tp1} color="text-system-online drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
+                        <MetricBlock label="TGT_2" value={sig.tp2} color="text-system-online drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
+                      </div>
+
+                      <div className="bg-surface border border-surface-border rounded p-2 pl-3 ml-2 text-[10px] mono text-gray-400 mt-2">
+                        <span className="text-brand font-bold mr-2">[{sig.regime}]</span>
+                        {sig.notes}
                       </div>
                     </div>
-                  ) : (
-                    <span className="text-gray-500 text-xs">—</span>
-                  )}
-                </td>
-                <td className="px-5 py-3 text-gray-400 text-xs">{c.added_at ? new Date(c.added_at).toLocaleDateString() : '—'}</td>
-                <td className="px-5 py-3">
-                  <button
-                    onClick={() => { setEvalSymbol(c.symbol); setEvalClass(c.asset_class as 'crypto' | 'stock') }}
-                    className="text-brand hover:text-brand-dark flex items-center gap-1 text-xs"
-                  >
-                    Evaluate <ChevronRight size={12} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Manual evaluation */}
-      <div className="card space-y-4">
-        <div className="text-sm font-medium text-gray-300">On-Demand Strategy Evaluation</div>
-        <div className="flex gap-3 flex-wrap">
-          <input
-            type="text"
-            placeholder="Symbol (e.g. XBTUSD)"
-            value={evalSymbol}
-            onChange={e => setEvalSymbol(e.target.value.toUpperCase())}
-            onKeyDown={e => e.key === 'Enter' && handleEvaluate()}
-            className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand mono w-48"
-          />
-          <select
-            value={evalClass}
-            onChange={e => setEvalClass(e.target.value as 'crypto' | 'stock')}
-            className="bg-surface border border-surface-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand"
-          >
-            <option value="crypto">Crypto</option>
-            <option value="stock">Stock</option>
-          </select>
-          <button
-            onClick={handleEvaluate}
-            disabled={evalLoading}
-            className="btn-primary flex items-center gap-2"
-          >
-            <Search size={14} />
-            {evalLoading ? 'Evaluating…' : 'Evaluate'}
-          </button>
-        </div>
-
-        {evalResult && (
-          <div className="space-y-3">
-            {evalResult.error && (
-              <div className="text-red-400 text-sm">{evalResult.error}</div>
-            )}
-            {evalResult.signals.length === 0 && !evalResult.error && (
-              <div className="text-gray-500 text-sm">No entry signals found for {evalResult.symbol}</div>
-            )}
-            {evalResult.signals.map((sig, i) => (
-              <div key={i} className="bg-surface rounded-lg border border-surface-border p-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-white text-sm">{sig.strategy}</span>
-                  <span className="text-xs mono text-brand">{(sig.confidence * 100).toFixed(0)}% confidence</span>
+                  ))}
                 </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                  <div><span className="text-gray-500">Entry</span><div className="mono text-white">{sig.entry_price?.toFixed(4)}</div></div>
-                  <div><span className="text-gray-500">Stop</span><div className="mono text-red-400">{sig.stop?.toFixed(4)}</div></div>
-                  <div><span className="text-gray-500">TP1</span><div className="mono text-emerald-400">{sig.tp1?.toFixed(4)}</div></div>
-                  <div><span className="text-gray-500">TP2</span><div className="mono text-emerald-400">{sig.tp2?.toFixed(4)}</div></div>
-                </div>
-                <div className="text-xs text-gray-500">Regime: <span className="text-gray-300">{sig.regime}</span> · {sig.notes}</div>
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
+
+      {/* Target Data Grid */}
+      <div className="flex items-center justify-between px-1">
+        <div className="text-xs text-gray-500 mono font-bold uppercase tracking-widest">Active Scan Array</div>
+        <div className="flex gap-2 bg-[#12141f] p-1 rounded-lg border border-surface-border">
+          {['', 'crypto', 'stock'].map(c => (
+            <button
+              key={c}
+              onClick={() => setFilterClass(c)}
+              className={clsx(
+                "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                filterClass === c 
+                  ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
+                  : "text-gray-500 hover:text-gray-300 border border-transparent"
+              )}
+            >
+              {c || 'ALL_NODES'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset">
+        {isLoading ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3 min-h-[300px]">
+             <Activity className="animate-pulse-slow text-brand" size={32} />
+             <span className="mono text-xs uppercase tracking-widest">Polling Telemetry Nodes...</span>
+          </div>
+        ) : (data?.candidates ?? []).length === 0 ? (
+          <div className="flex-1 flex items-center justify-center text-gray-500 mono text-sm uppercase tracking-widest min-h-[300px]">
+            No Telemetry Data Available
+          </div>
+        ) : (
+          <div className="overflow-auto flex-1 scrollbar-thin">
+            <table className="w-full text-left border-collapse">
+              <thead className="sticky top-0 z-20 bg-[#0b0c13] border-b border-surface-border">
+                {table.getHeaderGroups().map(headerGroup => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map(header => (
+                      <th 
+                        key={header.id} 
+                        onClick={header.column.getToggleSortingHandler()}
+                        className={clsx(
+                          "py-3 px-5 text-[10px] font-mono font-bold uppercase tracking-widest text-gray-500 bg-surface-card/80 backdrop-blur-md select-none whitespace-nowrap",
+                          header.column.getCanSort() ? "cursor-pointer hover:text-white transition-colors group" : ""
+                        )}
+                      >
+                        <div className="flex items-center gap-2">
+                          {flexRender(header.column.columnDef.header, header.getContext())}
+                          {header.column.getCanSort() && (
+                            <ArrowUpDown size={12} className={clsx(
+                              "transition-opacity",
+                              header.column.getIsSorted() ? "opacity-100 text-brand" : "opacity-0 group-hover:opacity-50"
+                            )} />
+                          )}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                ))}
+              </thead>
+              <tbody className="mono text-sm">
+                {table.getRowModel().rows.map(row => (
+                  <tr key={row.id} className="border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group">
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="bg-[#0b0c13] border-t border-surface-border px-5 py-2 flex justify-between items-center text-[10px] mono text-gray-600 uppercase tracking-widest shrink-0">
+          <span>{table.getRowModel().rows.length} Rendered</span>
+          <span>Buffer: <span className="text-system-online">Synced</span></span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MetricBlock({ label, value, color }: { label: string, value: number, color: string }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-[9px] text-gray-500 mono mb-0.5">{label}</span>
+      <span className={clsx("font-mono font-bold text-sm tracking-tight", color)}>
+        {value.toFixed(4)}
+      </span>
     </div>
   )
 }

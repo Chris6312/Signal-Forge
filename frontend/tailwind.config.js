@@ -10,8 +10,8 @@ export default {
           glow: 'rgba(99, 102, 241, 0.15)',
         },
         surface: {
-          DEFAULT: '#090a0f', // Deeper black for the void
-          card: '#12141f',    // Slightly elevated
+          DEFAULT: '#090a0f',
+          card: '#12141f',
           border: '#1f2335',
           hover: '#1b1e2d',
         },
@@ -34,5 +34,7 @@ export default {
       }
     },
   },
-  plugins: [],
+  plugins: [
+    require('tailwindcss-animate'),
+  ],
 }

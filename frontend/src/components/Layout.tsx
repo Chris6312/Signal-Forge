@@ -5,7 +5,6 @@ import WebSocketProvider, { useWebSocket } from '@/providers/WebSocketProvider'
 import CommandPalette from './CommandPalette'
 import { Activity, WifiOff, RefreshCcw, Command as CmdIcon } from 'lucide-react'
 import { Toaster } from 'sonner'
-import clsx from 'clsx'
 
 // Separate component to consume the WSS context
 function GlobalHeader() {
