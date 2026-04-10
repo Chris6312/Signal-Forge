@@ -110,8 +110,16 @@ class DiscordListener:
             for item in symbols:
                 if not item.get("asset_class"):
                     item["asset_class"] = top_level_ac
+        # Preserve incoming payload metadata so the watchlist engine can emit
+        # richer audit events (schema versioning, scan ids, timestamps).
+        payload_meta = {
+            "schema_version": payload.get("schema_version"),
+            "timestamp": payload.get("timestamp"),
+            "source": payload.get("source", source),
+            "scan_id": payload.get("scan_id"),
+        }
         try:
-            result = await watchlist_engine.process_update(symbols, source_id=str(message.id))
+            result = await watchlist_engine.process_update(symbols, source_id=str(message.id), payload_meta=payload_meta)
         except Exception as exc:
             logger.error("Watchlist engine error (msg=%s): %s", message.id, exc)
             await self._reply(message, f"❌ **Rejected** — internal error processing watchlist: {exc}")

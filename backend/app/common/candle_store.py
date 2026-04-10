@@ -181,3 +181,19 @@ class CandleStore:
         keys = [k for k in self._frames if k[0] == symbol]
         for k in keys:
             del self._frames[k]
+
+    def frame_info(self, symbol: str, interval_minutes: int) -> dict:
+        """Return metadata about a cached frame for debugging/monitoring.
+
+        Returns a dict with keys: count, sequence_ok, incomplete, last_time_raw.
+        If no frame present, count==0 and incomplete==True.
+        """
+        frame = self._frames.get((symbol, interval_minutes))
+        if not frame:
+            return {"count": 0, "sequence_ok": False, "incomplete": True, "last_time_raw": None}
+        return {
+            "count": len(frame.candles),
+            "sequence_ok": bool(frame.sequence_ok),
+            "incomplete": bool(frame.incomplete),
+            "last_time_raw": frame.last_time_raw,
+        }

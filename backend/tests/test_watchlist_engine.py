@@ -36,7 +36,7 @@ def test_process_update_adds_and_updates(monkeypatch):
     ]
 
     import asyncio
-    result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest'))
+    result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=None))
 
     assert result['total'] == 2
     # canonical_symbol will normalize BTCUSD to BTC/USD; accept either form
@@ -70,6 +70,37 @@ def test_process_update_skips_invalid_asset_class(monkeypatch):
     ]
 
     import asyncio
-    result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest'))
+    result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=None))
+
+
+def test_process_update_v4_validation_and_ai_hint(monkeypatch):
+    fake_db = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.scalars.return_value.all.return_value = []
+    fake_db.execute = AsyncMock(return_value=fake_result)
+    fake_db.add = lambda obj: None
+    fake_db.commit = AsyncMock()
+
+    class _Ctx:
+        def __init__(self, db):
+            self._db = db
+
+        async def __aenter__(self):
+            return self._db
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr('app.common.watchlist_engine.AsyncSessionLocal', lambda: _Ctx(fake_db))
+
+    payload = [
+        {"symbol": "BTC/USD", "asset_class": "crypto", "ai_hint": {"suggested_strategy": "trend_continuation", "confidence": 0.85}},
+        {"symbol": "INVALID", "asset_class": "crypto", "ai_hint": {"suggested_strategy": "unknown_strategy", "confidence": 0.5}},
+    ]
+
+    meta = {"schema_version": "bot_watchlist_v4", "timestamp": datetime.now(timezone.utc).isoformat()}
+    result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=meta))
+    # One valid (BTC/USD) added, one invalid skipped
+    assert result['total'] == 1
     assert result['total'] == 0
 

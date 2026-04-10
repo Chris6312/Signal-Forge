@@ -218,3 +218,73 @@ class TestEvaluateAll:
 
     def test_does_not_raise_on_empty_history(self):
         assert evaluate_all("AAPL", []) == []
+
+
+def test_ai_hint_bias_applied_and_capped(caplog):
+    # Build a history that yields a PullbackReclaim signal
+    base = trending_up_history(56, start=100.0, end=180.0)
+    for _ in range(5):
+        base.append(make_bar(155.0))
+    base.append(make_bar(175.0))
+
+    ai_hint = {"suggested_strategy": "pullback_reclaim", "confidence": 1.0}
+    caplog.set_level("INFO")
+    signals = evaluate_all("AAPL", base, ai_hint=ai_hint, payload_meta={"schema_version": "bot_watchlist_v4"})
+    # Ensure at least one signal returned
+    assert isinstance(signals, list)
+    # Audit log should contain BOT_STRATEGY_DECISION JSON
+    found = False
+    for rec in caplog.records:
+        if "BOT_STRATEGY_DECISION" in rec.getMessage():
+            found = True
+            msg = rec.getMessage()
+            # JSON payload is after the second pipe
+            parts = msg.split("|", 2)
+            assert len(parts) == 3
+            import json
+            payload = json.loads(parts[2].strip())
+            assert payload["ai_hint_strategy"] == "pullback_reclaim"
+            assert payload["ai_hint_bias_amount"] == pytest.approx(0.03)
+            assert payload["ai_hint_agreement"] is True
+    assert found
+
+
+def test_ai_hint_does_not_make_invalid_strategy_valid(caplog):
+    # trending up history — mean reversion should be invalid
+    base = trending_up_history(65)
+    ai_hint = {"suggested_strategy": "mean_reversion_bounce", "confidence": 0.99}
+    caplog.set_level("INFO")
+    signals = evaluate_all("AAPL", base, ai_hint=ai_hint, payload_meta={"schema_version": "bot_watchlist_v4"})
+    # Check audit payload shows mean_reversion_bounce rejected
+    found = False
+    for rec in caplog.records:
+        if "BOT_STRATEGY_DECISION" in rec.getMessage():
+            found = True
+            import json
+            parts = rec.getMessage().split("|", 2)
+            payload = json.loads(parts[2].strip())
+            assert payload["ai_hint_strategy"] == "mean_reversion_bounce"
+            # bot should disagree (selected different strategy or none)
+            assert payload.get("ai_hint_agreement") in (False, None)
+            # bias amount must be zero for an invalid strategy
+            assert payload["ai_hint_bias_amount"] == pytest.approx(0.0)
+    assert found
+
+
+def test_no_ai_hint_means_zero_bias(caplog):
+    base = trending_up_history(56, start=100.0, end=180.0)
+    for _ in range(5):
+        base.append(make_bar(155.0))
+    base.append(make_bar(175.0))
+    caplog.set_level("INFO")
+    signals = evaluate_all("AAPL", base, ai_hint=None, payload_meta={"schema_version": "bot_watchlist_v4"})
+    found = False
+    for rec in caplog.records:
+        if "BOT_STRATEGY_DECISION" in rec.getMessage():
+            found = True
+            import json
+            parts = rec.getMessage().split("|", 2)
+            payload = json.loads(parts[2].strip())
+            assert payload["ai_hint_bias_amount"] == pytest.approx(0.0)
+            assert payload["ai_hint_strategy"] is None
+    assert found

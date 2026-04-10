@@ -123,6 +123,18 @@ class StockMonitor:
             "daily": self._store.get(ws.symbol, TF_MINUTES["daily"]),
         }
 
+        # Debug: log candle frame metadata to explain empty-signal cases
+        try:
+            tf_info = {}
+            for tf, iv in (("1m", TF_MINUTES["1m"]), ("5m", TF_MINUTES["5m"]), ("15m", TF_MINUTES["15m"]), ("daily", TF_MINUTES["daily"])):
+                try:
+                    tf_info[tf] = self._store.frame_info(ws.symbol, iv)
+                except Exception as e:
+                    tf_info[tf] = {"error": str(e)}
+            logger.debug("CANDLE_FRAMES | %s | %s", ws.symbol, tf_info)
+        except Exception:
+            pass
+
         signals = evaluate_all(ws.symbol, candles_by_tf)
         if not signals:
             return

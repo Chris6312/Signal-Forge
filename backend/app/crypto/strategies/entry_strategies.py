@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+from app.common.watchlist_schema_v4 import score_strategy_from_candles, compute_hint_bias, BotDecision, WEIGHTS, compute_features_for_signal, compute_strategy_score
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +389,22 @@ ENTRY_STRATEGIES = [
     FailedBreakdownReclaim(),
 ]
 
+# Scoring thresholds
+MIN_SCORE_THRESHOLD = 0.35
+STRONG_SIGNAL_THRESHOLD = 0.60
+
+
+def _strategy_name_to_key(name: str) -> str | None:
+    if "Pullback Reclaim" in name:
+        return "pullback_reclaim"
+    if "Momentum Breakout Continuation" in name:
+        return "trend_continuation"
+    if "Mean Reversion Bounce" in name:
+        return "mean_reversion_bounce"
+    if any(p in name for p in ("Range Rotation Reversal", "Breakout Retest Hold")):
+        return "range_breakout"
+    return None
+
 
 def evaluate_all(symbol, candles_by_tf):
     if isinstance(candles_by_tf, list):
@@ -402,10 +420,92 @@ def evaluate_all(symbol, candles_by_tf):
         if len(ohlcv) < 20:
             continue
         try:
-            sig = strat.evaluate(symbol, ohlcv)
-            if sig:
-                signals.append(sig)
+            key = _strategy_name_to_key(strat.name) or ""
+            feature_scores = compute_features_for_signal(key, strat.evaluate(symbol, ohlcv) or None)
+            base_score = score_strategy_from_candles(key, feature_scores)
+            if base_score >= MIN_SCORE_THRESHOLD:
+                try:
+                    sig = strat.evaluate(symbol, ohlcv)
+                except Exception:
+                    sig = None
+                if sig:
+                    signals.append(sig)
+                else:
+                    # Build a minimal EntrySignal from features
+                    s = EntrySignal(
+                        strategy=strat.name,
+                        symbol=symbol,
+                        entry_price=0.0,
+                        initial_stop=0.0,
+                        profit_target_1=0.0,
+                        profit_target_2=0.0,
+                        regime=None,
+                        confidence=base_score,
+                    )
+                    signals.append(s)
         except Exception as e:
             logger.error("Strategy %s failed for %s: %s", strat.name, symbol, e)
     signals.sort(key=lambda s: s.confidence, reverse=True)
+    # Build evaluated strategies and apply hint bias if provided under payload_meta
+    # Note: this function keeps original signature to avoid widespread changes;
+    # consumers can pass ai_hint and payload_meta in the future by wrapping.
+
+    # For parity with stocks, build a simplified evaluated map
+    key_map = {
+        "pullback_reclaim": ["Pullback Reclaim"],
+        "trend_continuation": ["Momentum Breakout Continuation"],
+        "mean_reversion_bounce": ["Mean Reversion Bounce"],
+        "range_breakout": ["Range Rotation Reversal", "Breakout Retest Hold"],
+    }
+
+    evaluated = {}
+    for key, patterns in key_map.items():
+        matched = None
+        for s in signals:
+            for pat in patterns:
+                if pat in s.strategy:
+                    if matched is None or s.confidence > matched.confidence:
+                        matched = s
+        if matched:
+            # derive features from matched signal when possible
+            feature_scores = compute_features_for_signal(key, matched, asset_class="crypto")
+            base_score = compute_strategy_score(key, feature_scores, regime=matched.regime if hasattr(matched, "regime") else None, asset_class="crypto")
+            # No ai_hint passed into this function currently — bias 0.0
+            bias = 0.0
+            final_score = min(1.0, base_score + bias)
+            evaluated[key] = {
+                "valid": True,
+                "base_score": round(base_score, 6),
+                "bias": round(bias, 6),
+                "final_score": round(final_score, 6),
+                "reason": None,
+            }
+        else:
+            reason = "no candidate signals" if not signals else "no matching signal"
+            evaluated[key] = {
+                "valid": False,
+                "base_score": 0.0,
+                "bias": 0.0,
+                "final_score": 0.0,
+                "reason": reason,
+            }
+
+    # Emit audit with evaluated strategy scores — AI hint not wired here yet
+    # Debug: log candidate count and evaluated map before emission
+    try:
+        logger.debug("BOT_STRATEGY_DECISION debug | %s | candidate_signals=%d", symbol, len(signals))
+        logger.debug("BOT_STRATEGY_DECISION debug | %s | evaluated_raw=%s", symbol, json.dumps(evaluated))
+    except Exception:
+        pass
+
+    audit_payload = {
+        "symbol": symbol,
+        "asset_class": "crypto",
+        "evaluated_strategy_scores": {k: v["final_score"] for k, v in evaluated.items()},
+        "evaluated_strategies": evaluated,
+        "rejected_strategies": {k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
+        "timestamp_evaluated": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.info("[AUDIT] BOT_STRATEGY_DECISION | %s | %s", symbol, json.dumps(audit_payload))
+
     return signals

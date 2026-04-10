@@ -2,6 +2,19 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+from app.common.watchlist_schema_v4 import (
+    score_strategy_from_candles,
+    compute_hint_bias,
+    BotDecision,
+    WEIGHTS,
+    compute_features_for_signal,
+)
+from app.common.watchlist_schema_v4 import compute_strategy_score
+from app.common.models.audit import AuditSource
+import json
+from app.common.models.bot_decision import BotStrategyDecision
+from app.common.database import AsyncSessionLocal
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +87,59 @@ def _ema_value_at(ema_series: list[float], period: int, idx: int) -> Optional[fl
     ema_idx = idx - (period - 1)
     if ema_idx < 0 or ema_idx >= len(ema_series):
         return None
+
+
+def _extract_candle_features_from_primary(strategy_key: str, primary: list[dict]):
+    """Build a synthetic signal from candles and return feature scores dict.
+
+    This avoids depending on strategy.evaluate() to create a candidate — we
+    derive normalized features directly from the primary timeframe candles
+    and reuse existing compute_features_for_signal to ensure parity.
+    """
+    closes = _closes(primary)
+    if not closes:
+        # fallback neutral features
+        class _S: pass
+        s = _S()
+        s.reasoning = {}
+        s.regime = None
+        s.entry_price = 0.0
+        s.initial_stop = 0.0
+        s.profit_target_1 = 0.0
+        return compute_features_for_signal(strategy_key, s)
+
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    current = closes[-1]
+    atr = _atr_from_history(primary)
+    regime = _detect_regime(primary)
+
+    reasoning = {}
+    if ema20:
+        reasoning["ema20"] = round(ema20[-1], 6)
+        reasoning["current_vs_ema20"] = round(current - ema20[-1], 6)
+    if ema50:
+        reasoning["ema50"] = round(ema50[-1], 6)
+    if atr:
+        reasoning["atr"] = round(atr, 6)
+    # best-effort simple breakout_pct using recent highs
+    try:
+        highs = _highs(primary)
+        recent_high = max(highs[-20:-1]) if len(highs) >= 3 else highs[-1]
+        reasoning["breakout_pct"] = round((current / max(recent_high, 1.0) - 1) * 100, 3)
+    except Exception:
+        pass
+
+    class _FakeSig:
+        pass
+
+    s = _FakeSig()
+    s.reasoning = reasoning
+    s.regime = regime
+    s.entry_price = current
+    s.initial_stop = (min(_lows(primary)[-6:-1]) - atr * 0.3) if len(primary) >= 6 else current - atr * 0.5
+    s.profit_target_1 = current + atr * 1.5
+    return compute_features_for_signal(strategy_key, s)
     return ema_series[ema_idx]
 
 
@@ -191,6 +257,7 @@ class OpeningRangeBreakout:
                 "bars_in_session": len(session_bars),
             },
         )
+
 
 
 class PullbackReclaim:
@@ -503,10 +570,28 @@ STOCK_ENTRY_STRATEGIES = [
     VolatilityCompressionBreakout(),
 ]
 
+# Scoring thresholds
+MIN_SCORE_THRESHOLD = 0.35
+STRONG_SIGNAL_THRESHOLD = 0.60
+
+
+def _strategy_name_to_key(name: str) -> str | None:
+    if "Pullback Reclaim" in name:
+        return "pullback_reclaim"
+    if "Trend Continuation" in name or "Momentum Breakout Continuation" in name:
+        return "trend_continuation"
+    if "Mean Reversion Bounce" in name:
+        return "mean_reversion_bounce"
+    if any(p in name for p in ("Opening Range Breakout", "Breakout Retest Hold", "Volatility Compression Breakout", "Range Rotation Reversal")):
+        return "range_breakout"
+    return None
+
 
 def evaluate_all(
     symbol: str,
     candles: "list[dict] | dict[str, list]",
+    ai_hint: dict | None = None,
+    payload_meta: dict | None = None,
 ) -> list[StockEntrySignal]:
     """
     Evaluate all stock entry strategies.
@@ -524,22 +609,215 @@ def evaluate_all(
     else:
         candles_by_tf = candles
 
+    # Candidate extraction using continuous scoring rather than boolean evaluate()
     signals = []
     for strategy in STOCK_ENTRY_STRATEGIES:
         primary = candles_by_tf.get(strategy.primary_tf, [])
         if len(primary) < 20:
             continue
         try:
-            sig = strategy.evaluate(symbol, primary)
-            if sig:
-                if sig.initial_stop >= sig.entry_price:
-                    logger.warning(
-                        "Skipping %s signal for %s: stop %.4f >= entry %.4f (near-zero ATR)",
-                        sig.strategy, symbol, sig.initial_stop, sig.entry_price,
-                    )
-                else:
-                    signals.append(sig)
+            key = _strategy_name_to_key(strategy.name) or ""
+            feature_scores = _extract_candle_features_from_primary(key, primary)
+            base_score = score_strategy_from_candles(key, feature_scores)
+            if base_score >= MIN_SCORE_THRESHOLD:
+                # Build a simplified signal record compatible with downstream code
+                try:
+                    sig_obj = strategy.evaluate(symbol, primary)
+                except Exception:
+                    sig_obj = None
+                candidate = StockEntrySignal(
+                    strategy=strategy.name,
+                    symbol=symbol,
+                    entry_price=getattr(sig_obj, "entry_price", 0.0) if sig_obj else feature_scores.get("entry_price", 0.0),
+                    initial_stop=getattr(sig_obj, "initial_stop", 0.0) if sig_obj else 0.0,
+                    profit_target_1=getattr(sig_obj, "profit_target_1", 0.0) if sig_obj else 0.0,
+                    profit_target_2=getattr(sig_obj, "profit_target_2", 0.0) if sig_obj else 0.0,
+                    regime=getattr(sig_obj, "regime", None) if sig_obj else None,
+                    confidence=max(getattr(sig_obj, "confidence", 0.0) if sig_obj else 0.0, base_score),
+                    max_hold_hours=getattr(sig_obj, "max_hold_hours", 8) if sig_obj else 8,
+                    notes=getattr(sig_obj, "notes", "") if sig_obj else "",
+                    reasoning=getattr(sig_obj, "reasoning", {}) if sig_obj else {},
+                )
+                signals.append(candidate)
         except Exception as exc:
             logger.error("Stock strategy %s error for %s: %s", strategy.name, symbol, exc)
     signals.sort(key=lambda s: s.confidence, reverse=True)
+
+    # Build evaluated strategies map for required supported keys
+    key_map = {
+        "pullback_reclaim": ["Pullback Reclaim"],
+        "trend_continuation": ["Trend Continuation", "Trend Continuation Ladder", "Momentum Breakout Continuation"],
+        "mean_reversion_bounce": ["Mean Reversion Bounce"],
+        "range_breakout": ["Opening Range Breakout", "Breakout Retest Hold", "Volatility Compression Breakout", "Range Rotation Reversal"],
+    }
+
+    evaluated: dict[str, dict] = {}
+    rejected: dict[str, str] = {}
+
+    for key, name_patterns in key_map.items():
+        matched = None
+        for s in signals:
+            for pat in name_patterns:
+                if pat in s.strategy:
+                    if matched is None or s.confidence > matched.confidence:
+                        matched = s
+        if matched:
+            # Compute feature-based scores from the actual signal reasoning
+            feature_scores = compute_features_for_signal(key, matched, asset_class="stock")
+            base_score = compute_strategy_score(key, feature_scores, regime=matched.regime if hasattr(matched, "regime") else None, asset_class="stock")
+            bias = compute_hint_bias(ai_hint, key) if ai_hint else 0.0
+            # Only apply bias to already-valid signals (do not rescue invalid setups)
+            final_score = base_score + bias
+            if final_score > 1.0:
+                final_score = 1.0
+            evaluated[key] = {
+                "valid": True,
+                "base_score": round(base_score, 6),
+                "bias": round(bias, 6),
+                "final_score": round(final_score, 6),
+                "reason": None,
+                "feature_scores": {k: round(v, 6) for k, v in feature_scores.items()},
+            }
+        else:
+            # Differentiate reasons: if we had no candidate signals at all,
+            # report that; otherwise indicate no matching signal for this key.
+            reason = "no candidate signals" if not signals else "no matching signal"
+            evaluated[key] = {
+                "valid": False,
+                "base_score": 0.0,
+                "bias": 0.0,
+                "final_score": 0.0,
+                "reason": reason,
+            }
+
+    # Select best valid strategy deterministically
+    best_key = None
+    for k, v in evaluated.items():
+        if not v["valid"]:
+            continue
+        if best_key is None or v["final_score"] > evaluated[best_key]["final_score"] or (
+            v["final_score"] == evaluated[best_key]["final_score"] and k < best_key
+        ):
+            best_key = k
+
+    ai_strat = ai_hint.get("suggested_strategy") if ai_hint else None
+    ai_conf = float(ai_hint.get("confidence")) if ai_hint and ai_hint.get("confidence") is not None else None
+    ai_agreement = None
+    bias_applied = False
+    bias_amount = 0.0
+    selected_score = 0.0
+    if best_key:
+        selected_score = evaluated[best_key]["final_score"]
+        ai_agreement = (ai_strat == best_key) if ai_strat else None
+        bias_applied = evaluated[best_key]["bias"] > 0.0
+        bias_amount = evaluated[best_key]["bias"]
+
+    decision = BotDecision(
+        selected_strategy=best_key,
+        selected_score=selected_score,
+        evaluated_strategies={k: v["final_score"] for k, v in evaluated.items()},
+        ai_hint_strategy=ai_strat,
+        ai_hint_confidence=ai_conf,
+        ai_hint_agreement=ai_agreement,
+        ai_hint_bias_applied=bias_applied,
+        ai_hint_bias_amount=bias_amount,
+        feature_scores={k: v.get("feature_scores") for k, v in evaluated.items()},
+    )
+
+    # Emit structured audit event via logs (and root logger for tests)
+    # Debug info: candidate count, raw evaluated map, and selected strategy
+    try:
+        logger.debug("BOT_STRATEGY_DECISION debug | %s | candidate_signals=%d", symbol, len(signals))
+        logger.debug("BOT_STRATEGY_DECISION debug | %s | evaluated_raw=%s", symbol, json.dumps(evaluated))
+        logger.debug("BOT_STRATEGY_DECISION debug | %s | selected_strategy=%s", symbol, decision.selected_strategy)
+    except Exception:
+        # keep audit emission robust even if debugging serialization fails
+        pass
+    # Additional candle frame debug when available via payload_meta.store
+    try:
+        if payload_meta and payload_meta.get("store"):
+            store = payload_meta.get("store")
+            tf_info = {}
+            for tf in ("1m", "5m", "15m", "1H", "4H", "daily"):
+                try:
+                    iv = {"1m":1, "5m":5, "15m":15, "1H":60, "4H":240, "daily":1440}[tf]
+                    tf_info[tf] = store.frame_info(symbol, iv)
+                except Exception:
+                    tf_info[tf] = {"error": "frame_info failed"}
+            logger.debug("BOT_STRATEGY_DECISION debug | %s | candle_frames=%s", symbol, json.dumps(tf_info))
+    except Exception:
+        pass
+
+    audit_payload = {
+        "schema_version": payload_meta.get("schema_version") if payload_meta else None,
+        "source": payload_meta.get("source") if payload_meta else None,
+        "scan_id": payload_meta.get("scan_id") if payload_meta else None,
+        "symbol": symbol,
+        "asset_class": "stock",
+        "ai_hint_strategy": ai_strat,
+        "ai_hint_confidence": ai_conf,
+        "bot_selected_strategy": decision.selected_strategy,
+        "bot_selected_score": decision.selected_score,
+        "ai_hint_agreement": decision.ai_hint_agreement,
+        "ai_hint_bias_applied": decision.ai_hint_bias_applied,
+        "ai_hint_bias_amount": decision.ai_hint_bias_amount,
+        # Preserve backward-compatible final-score map
+        "evaluated_strategy_scores": decision.evaluated_strategies,
+        # Provide full evaluated strategy map with detailed per-strategy fields
+        "evaluated_strategies": evaluated,
+        "rejected_strategies": {k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
+        "feature_scores": {k: v.get("feature_scores") for k, v in evaluated.items()},
+        "timestamp_received": payload_meta.get("timestamp") if payload_meta else None,
+        "timestamp_evaluated": datetime.now(timezone.utc).isoformat(),
+    }
+    # Single emission through module logger to avoid duplicate audit lines
+    logger.info("[AUDIT] BOT_STRATEGY_DECISION | %s | %s", symbol, json.dumps(audit_payload))
+
+    # Persist BotStrategyDecision row asynchronously if DB available
+    async def _persist_decision():
+        try:
+            async with AsyncSessionLocal() as db:
+                row = BotStrategyDecision(
+                    evaluated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    received_at=payload_meta.get("timestamp") if payload_meta else None,
+                    symbol=symbol,
+                    normalized_symbol=symbol,
+                    asset_class="stock",
+                    source=payload_meta.get("source") if payload_meta else None,
+                    scan_id=payload_meta.get("scan_id") if payload_meta else None,
+                    schema_version=payload_meta.get("schema_version") if payload_meta else None,
+                    regime=signals[0].regime if signals else None,
+                    ai_hint_present=bool(ai_hint),
+                    ai_hint_strategy=ai_strat,
+                    ai_hint_confidence=ai_conf,
+                    ai_hint_bias_applied=decision.ai_hint_bias_applied,
+                    ai_hint_bias_amount=decision.ai_hint_bias_amount,
+                    bot_selected_strategy=decision.selected_strategy,
+                    bot_selected_score=decision.selected_score or 0.0,
+                    ai_hint_agreement=decision.ai_hint_agreement,
+                    evaluated_strategy_scores=decision.evaluated_strategies,
+                    rejected_strategies={k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
+                    feature_scores=decision.feature_scores or {},
+                    decision_context={
+                        "payload_meta": payload_meta,
+                    },
+                )
+                db.add(row)
+                await db.commit()
+        except Exception:
+            logger.exception("Failed to persist BotStrategyDecision for %s", symbol)
+
+    try:
+        import asyncio
+
+        asyncio.create_task(_persist_decision())
+    except Exception:
+        # If event loop not running (tests), run synchronously
+        import asyncio
+
+        try:
+            asyncio.run(_persist_decision())
+        except Exception:
+            logger.exception("Failed to persist BotStrategyDecision synchronously for %s", symbol)
+
     return signals

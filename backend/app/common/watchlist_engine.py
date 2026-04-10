@@ -11,6 +11,7 @@ from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.database import AsyncSessionLocal
 from app.common.symbols import canonical_symbol
+from app.common.watchlist_schema_v4 import validate_symbol_entry
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class WatchlistEngine:
         self,
         new_symbols: List[dict],
         source_id: str = "",
+        payload_meta: dict | None = None,
     ) -> dict:
         # AsyncSessionLocal may be an async context manager factory or an
         # async generator (FastAPI dependency override yields). Support both
@@ -29,7 +31,7 @@ class WatchlistEngine:
         # If it implements the async context manager protocol, use it
         if hasattr(session_ctx, "__aenter__"):
             async with session_ctx as db:
-                result = await self._process(db, new_symbols, source_id)
+                result = await self._process(db, new_symbols, source_id, payload_meta)
                 await db.commit()
                 return result
         # Otherwise assume it's an async generator that yields a session
@@ -37,7 +39,7 @@ class WatchlistEngine:
             db = None
             try:
                 db = await session_ctx.__anext__()
-                result = await self._process(db, new_symbols, source_id)
+                result = await self._process(db, new_symbols, source_id, payload_meta)
                 try:
                     await db.commit()
                 except Exception:
@@ -51,7 +53,7 @@ class WatchlistEngine:
         # Fallback: call and await if it's a coroutine returning a session
         try:
             db = await session_ctx
-            result = await self._process(db, new_symbols, source_id)
+            result = await self._process(db, new_symbols, source_id, payload_meta)
             await db.commit()
             return result
         except Exception:
@@ -62,25 +64,40 @@ class WatchlistEngine:
         db: AsyncSession,
         new_symbols: List[dict],
         source_id: str,
+        payload_meta: dict | None = None,
     ) -> dict:
         # Normalize incoming items into tuples: (symbol, asset_class, metadata)
         incoming_items = []
         incoming_asset_classes: set[str] = set()
+        # Collect any AI hint payloads per symbol for auditing
+        ai_hints_seen: dict[str, dict] = {}
+        validation_reasons: dict[str, str] = {}
+
         for item in new_symbols:
             try:
                 ac = (item.get("asset_class") or "").lower()
                 if ac not in ("crypto", "stock"):
                     # Skip invalid asset classes
                     continue
+                # Only enforce strict v4 validation when the payload declares v4
+                if payload_meta and payload_meta.get("schema_version") == "bot_watchlist_v4":
+                    reason = validate_symbol_entry(item)
+                    if reason:
+                        validation_reasons[str(item.get("symbol") or "")] = reason
+                        continue
                 sym = canonical_symbol(item.get("symbol", ""), asset_class=ac)
                 meta = {
                     "reason": item.get("reason"),
                     "confidence": float(item.get("confidence")) if item.get("confidence") is not None else None,
                     "tags": item.get("tags") if isinstance(item.get("tags"), (list, tuple)) else None,
                     "notes": item.get("notes"),
+                    # Preserve raw AI hint if present for auditability
+                    "ai_hint": item.get("ai_hint") if isinstance(item.get("ai_hint"), dict) else None,
                 }
                 incoming_items.append((sym, ac, meta))
                 incoming_asset_classes.add(ac)
+                if meta.get("ai_hint"):
+                    ai_hints_seen[sym] = meta.get("ai_hint")
             except Exception:
                 # Skip malformed entries but continue processing
                 continue
@@ -202,6 +219,11 @@ class WatchlistEngine:
                 "retained": retained,
                 "promoted": promoted,
                 "total": len(incoming_items),
+                "schema_version": payload_meta.get("schema_version") if payload_meta else None,
+                "scan_id": payload_meta.get("scan_id") if payload_meta else None,
+                "timestamp_received": payload_meta.get("timestamp") if payload_meta else None,
+                "ai_hints_seen": ai_hints_seen,
+                "validation_reasons": validation_reasons,
             },
         )
 
