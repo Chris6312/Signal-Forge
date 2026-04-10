@@ -84,15 +84,25 @@ class RegimeEngine:
         strategy: str,
         setup_score: float,
         current_open_positions: int,
+        max_positions_override: int | None = None,
     ) -> tuple[bool, str]:
+        """
+        Determine whether a new position can be opened under the current regime.
+
+        If `max_positions_override` is provided it will be used instead of the regime
+        policy's `max_positions`. This allows runtime configuration (e.g. admin overrides)
+        to limit open positions without changing regime policy definitions.
+        """
         policy = self.policy_for(asset_class)
 
         if not policy.allow_new_entries:
             return False, "new entries disabled by regime"
 
-        if current_open_positions >= policy.max_positions:
+        max_allowed = max_positions_override if max_positions_override is not None else policy.max_positions
+
+        if current_open_positions >= max_allowed:
             regime = self.stock_regime if asset_class.lower() == "stock" else self.crypto_regime
-            return False, f"at max positions ({policy.max_positions}) for {regime}"
+            return False, f"at max positions ({max_allowed}) for {regime}"
 
         if setup_score < policy.min_setup_score:
             return False, f"setup score {setup_score:.2f} below regime minimum {policy.min_setup_score:.2f}"

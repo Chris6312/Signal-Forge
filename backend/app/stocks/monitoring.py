@@ -131,7 +131,14 @@ class StockMonitor:
         logger.info("Stock entry signal: %s via %s (confidence=%.2f)", ws.symbol, best.strategy, best.confidence)
 
         current_count = await self._count_open_positions(db)
-        allowed, reason = regime_engine.can_open(ASSET_CLASS, best.strategy, best.confidence, current_count)
+        # Respect runtime overrides for max positions when evaluating regime limits
+        try:
+            max_override = await runtime_state.get_value("max_stock_positions")
+            if isinstance(max_override, str):
+                max_override = int(max_override)
+        except Exception:
+            max_override = None
+        allowed, reason = regime_engine.can_open(ASSET_CLASS, best.strategy, best.confidence, current_count, max_positions_override=max_override)
         if not allowed:
             logger.info("Entry blocked by regime [%s]: %s", regime_engine.stock_regime, reason)
             return

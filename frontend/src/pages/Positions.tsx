@@ -7,7 +7,6 @@ import {
   getSortedRowModel,
   getFilteredRowModel,
   useReactTable,
-  SortingState,
 } from '@tanstack/react-table'
 import { fetchOpenPositions } from '@/api/endpoints'
 import {

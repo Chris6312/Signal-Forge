@@ -149,7 +149,9 @@ export default function Monitoring() {
         const row = info.row.original
         const parts: string[] = []
         if (row.evaluation_error) parts.push('ERR')
-        if (row.has_open_position) parts.push('OPEN_POS')
+        // Prefer explicit open-position flag, but also accept any position_or_order_status containing OPEN
+        const posStatus = String(row.position_or_order_status || '')
+        if (row.has_open_position || /OPEN/i.test(posStatus)) parts.push('OPEN_POS')
         if (row.cooldown_active) parts.push('COOLDOWN')
         if (row.regime_allowed === false) parts.push('REGIME_BLOCK')
         if (row.blocked_reason) parts.push('BLOCKED')
