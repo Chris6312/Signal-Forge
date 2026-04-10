@@ -16,6 +16,7 @@ class StockExitDecision:
     partial_pct: float = 0.0
     new_stop: Optional[float] = None
     trailing_active: bool = False
+    tp1_hit: bool = False
 
 
 def _atr_from_history(history: list[dict], period: int = 14) -> float:
@@ -28,6 +29,37 @@ def _atr_from_history(history: list[dict], period: int = 14) -> float:
         prev_close = float(history[i - 1].get("close", 0))
         trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
     return sum(trs[-period:]) / period
+
+
+def _tp1_atr_trail_decision(position, current_price: float, history: list[dict], atr_multiplier: float = 1.0) -> Optional[StockExitDecision]:
+    stop = position.current_stop or position.initial_stop
+    entry = position.entry_price
+    milestone = position.milestone_state or {}
+    atr = _atr_from_history(history)
+    tp1 = position.profit_target_1
+
+    if milestone.get("tp1_hit"):
+        trail = float(milestone.get("trailing_stop", stop))
+        if current_price <= trail:
+            return StockExitDecision(True, f"Trail stop hit at {trail:.2f}")
+        if atr:
+            new_trail = max(trail, current_price - atr * atr_multiplier)
+            if new_trail > trail:
+                return StockExitDecision(False, "Trail updated", new_stop=new_trail, trailing_active=True)
+        return None
+
+    if tp1 and current_price >= tp1:
+        floor = max(float(stop), float(entry)) if stop is not None and entry is not None else float(stop or entry or current_price)
+        new_stop = max(floor, current_price - atr * atr_multiplier) if atr else floor
+        return StockExitDecision(
+            False,
+            "TP1 reached — ATR trail activated",
+            new_stop=new_stop,
+            trailing_active=True,
+            tp1_hit=True,
+        )
+
+    return None
 
 
 class FixedRiskBreakEvenPromotion:
@@ -45,6 +77,10 @@ class FixedRiskBreakEvenPromotion:
 
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit — intraday position")
+
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, history)
+        if tp1_decision:
+            return tp1_decision
 
         if not milestone.get("be_promoted") and tp1 and entry and current_price >= entry + (tp1 - entry) * 0.5:
             new_stop = max(stop, entry)
@@ -102,6 +138,10 @@ class FirstFailedFollowThroughExit:
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, history)
+        if tp1_decision:
+            return tp1_decision
+
         if len(history) >= 3:
             closes = [float(d.get("close", 0)) for d in history[-3:]]
             if closes[-1] < closes[-2] < closes[-3] and current_price < entry * 1.002:
@@ -122,6 +162,10 @@ class TimeStopExit:
 
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
+
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, history)
+        if tp1_decision:
+            return tp1_decision
 
         if position.entry_time and position.max_hold_hours:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -144,6 +188,10 @@ class VWAPStructureLossExit:
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit")
 
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, history)
+        if tp1_decision:
+            return tp1_decision
+
         if len(history) >= 10:
             lows = [float(d.get("low", 0)) for d in history[-10:]]
             structure_support = min(lows[:-1])
@@ -163,6 +211,10 @@ class EndOfDayExit:
 
         if _is_near_eod():
             return StockExitDecision(True, "End-of-day exit — session closing")
+
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, history)
+        if tp1_decision:
+            return tp1_decision
 
         return StockExitDecision(False, "Holding")
 

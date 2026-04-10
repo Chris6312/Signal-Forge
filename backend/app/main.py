@@ -57,7 +57,21 @@ class _WorkerThread:
         except Exception as exc:
             logger.error("Worker thread '%s' crashed: %s", self.name, exc, exc_info=True)
         finally:
-            self._loop.close()
+            # Attempt to close any thread-local Redis client bound to this thread's loop.
+            try:
+                from app.common.redis_client import close_redis
+                if self._loop and not self._loop.is_closed():
+                    try:
+                        self._loop.run_until_complete(close_redis())
+                    except Exception:
+                        logger.debug("close_redis failed in worker '%s'", self.name, exc_info=True)
+            except Exception:
+                logger.debug("Unable to import close_redis for worker '%s' cleanup", self.name, exc_info=True)
+            finally:
+                try:
+                    self._loop.close()
+                except Exception:
+                    logger.debug("Error closing loop for worker '%s'", self.name, exc_info=True)
 
     def stop(self, timeout: float = 15.0) -> None:
         if self._loop and self._task and not self._loop.is_closed():
@@ -240,6 +254,13 @@ async def lifespan(app: FastAPI):
 
     for wt in _worker_threads:
         wt.stop(timeout=15.0)
+
+    # Close main-thread Redis client if present
+    try:
+        from app.common.redis_client import close_redis
+        await close_redis()
+    except Exception as exc:
+        logger.warning("Error closing main Redis client: %s", exc)
 
 
 app = FastAPI(

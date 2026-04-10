@@ -6,45 +6,35 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
-  SortingState,
 } from '@tanstack/react-table'
 import { fetchLedgerAccounts, fetchLedgerEntries, postAdjustment } from '@/api/endpoints'
+import { LedgerAccount, LedgerEntry } from '@/api/types'
 import MetricCard from '@/components/MetricCard'
 import { RefreshCw, Plus, Download, BookOpen, Activity, ArrowUpDown, TerminalSquare } from 'lucide-react'
 import { formatET, relativeTime } from '@/utils/time'
 import clsx from 'clsx'
 
-interface LedgerAccount {
-  id: string
-  asset_class: string
-  cash_balance: number
-  fees_total: number
-  realized_pnl: number
-  unrealized_pnl: number
-  last_reconciled_at: string | null
-  updated_at: string | null
-}
+// Use shared types from api/types.ts
 
-interface LedgerEntry {
-  id: string
-  asset_class: string
-  entry_type: string
-  symbol: string | null
-  amount: number
-  balance_after: number
-  notes: string | null
-  created_at: string | null
-}
-
-const columnHelper = createColumnHelper<LedgerEntry>()
+const columnHelper = createColumnHelper()
+type LocalSortingState = Array<{ id: string; desc?: boolean }>
+type RefetchFn = () => Promise<unknown>
+type AdjustmentBody = { asset_class: 'crypto' | 'stock'; amount: number; notes: string }
 
 function formatCurrency(val: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(val)
 }
 
 function formatPnL(val: number) {
-  const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(val))
+  const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(Math.abs(val))
   return val >= 0 ? `+${formatted}` : `-${formatted}`
+}
+
+function formatAmount(val: number | null | undefined, assetClass?: string) {
+  if (val === null || val === undefined || Number.isNaN(val)) return '—'
+  const isCrypto = assetClass === 'crypto'
+  const nf = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: isCrypto ? 8 : 4 })
+  return nf.format(val)
 }
 
 export default function Ledger() {
@@ -54,25 +44,32 @@ export default function Ledger() {
   const [adjAmount, setAdjAmount] = useState('')
   const [adjNotes, setAdjNotes] = useState('')
   const [adjOpen, setAdjOpen] = useState(false)
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'created_at', desc: true }])
+  const [sorting, setSorting] = useState<LocalSortingState>([{ id: 'created_at', desc: true }])
 
   const params: Record<string, string> = {}
   if (filterClass) params.asset_class = filterClass
 
-  const { data: accounts = [], isLoading: accsLoading, refetch: refetchAccts } = useQuery<LedgerAccount[]>({
+  const qAccounts = useQuery({
     queryKey: ['ledger-accounts'],
     queryFn: fetchLedgerAccounts,
     refetchInterval: 15000,
-  })
+  }) as { data?: LedgerAccount[]; isLoading?: boolean; refetch?: RefetchFn }
+  const accounts = qAccounts.data ?? []
+  const accsLoading = qAccounts.isLoading
+  const refetchAccts = qAccounts.refetch
 
-  const { data: entries = [], isLoading: entriesLoading, refetch: refetchEntries, isRefetching } = useQuery<LedgerEntry[]>({
+  const qEntries = useQuery({
     queryKey: ['ledger-entries', filterClass],
     queryFn: () => fetchLedgerEntries(params),
     refetchInterval: 15000,
-  })
+  }) as { data?: LedgerEntry[]; isLoading?: boolean; refetch?: RefetchFn; isRefetching?: boolean }
+  const entries = qEntries.data ?? []
+  const entriesLoading = qEntries.isLoading
+  const refetchEntries = qEntries.refetch
+  const isRefetching = qEntries.isRefetching
 
   const mutation = useMutation({
-    mutationFn: (body: { asset_class: string; amount: number; notes: string }) => postAdjustment(body),
+    mutationFn: (body: AdjustmentBody) => postAdjustment(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['ledger-accounts'] })
       qc.invalidateQueries({ queryKey: ['ledger-entries'] })
@@ -147,23 +144,29 @@ export default function Ledger() {
       header: 'VECTOR',
       cell: info => <span className="text-white font-bold tracking-wider">{info.getValue() || 'SYS_GLOBAL'}</span>
     }),
-    columnHelper.accessor('amount', {
+                  columnHelper.accessor('amount', {
       header: 'DELTA_AMT',
       cell: info => {
-        const val = info.getValue()
-        return (
-          <span className={clsx(
-            "font-mono font-medium drop-shadow-[0_0_5px_currentColor]",
-            val >= 0 ? "text-system-online" : "text-system-offline"
-          )}>
-            {val >= 0 ? '+' : ''}{val.toFixed(4)}
-          </span>
-        )
+                        const val = info.getValue()
+                        const assetClass = info.row.original.asset_class
+                        const formatted = formatAmount(val, assetClass)
+                        const positive = typeof val === 'number' && val >= 0
+                        return (
+                          <span className={clsx(
+                            "font-mono font-medium drop-shadow-[0_0_5px_currentColor]",
+                            positive ? "text-system-online" : "text-system-offline"
+                          )}>
+                            {positive ? '+' : ''}{formatted}
+                          </span>
+                        )
       }
     }),
     columnHelper.accessor('balance_after', {
       header: 'LIQUIDITY_POST',
-      cell: info => <span className="text-gray-300 font-mono">{info.getValue().toFixed(4)}</span>
+                    cell: info => {
+                      const assetClass = info.row.original.asset_class
+                      return <span className="text-gray-300 font-mono">{formatAmount(info.getValue(), assetClass)}</span>
+                    }
     }),
     columnHelper.accessor('notes', {
       header: 'SYS_LOG',
@@ -180,8 +183,8 @@ export default function Ledger() {
     getSortedRowModel: getSortedRowModel(),
   })
 
-  const cryptoAcct = accounts.find(a => a.asset_class === 'crypto')
-  const stockAcct = accounts.find(a => a.asset_class === 'stock')
+  const cryptoAcct = accounts.find((a: LedgerAccount) => a.asset_class === 'crypto')
+  const stockAcct = accounts.find((a: LedgerAccount) => a.asset_class === 'stock')
 
   return (
     <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">

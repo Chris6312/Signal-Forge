@@ -13,6 +13,7 @@ class ExitDecision:
     partial_pct: float = 0.0
     new_stop: Optional[float] = None
     trailing_active: bool = False
+    tp1_hit: bool = False
 
 
 def _atr(ohlcv: list, period: int = 14) -> float:
@@ -50,6 +51,37 @@ def _stop_confirmed(current_price: float, stop: float, ohlcv: list) -> bool:
     return True  # no prior candle data — trust ticker
 
 
+def _tp1_atr_trail_decision(position, current_price: float, ohlcv: list, atr_multiplier: float = 1.5) -> Optional[ExitDecision]:
+    entry = position.entry_price
+    stop = position.current_stop or position.initial_stop
+    milestone = position.milestone_state or {}
+    atr = _atr(ohlcv)
+    tp1 = position.profit_target_1
+
+    if milestone.get("tp1_hit"):
+        trail = float(milestone.get("trailing_stop", stop))
+        if _stop_confirmed(current_price, trail, ohlcv):
+            return ExitDecision(True, f"Trail stop hit at {trail:.4f}")
+        if atr:
+            new_trail = max(trail, current_price - atr * atr_multiplier)
+            if new_trail > trail:
+                return ExitDecision(False, "Trail updated", new_stop=new_trail, trailing_active=True)
+        return None
+
+    if tp1 and current_price >= tp1:
+        floor = max(float(stop), float(entry)) if stop is not None and entry is not None else float(stop or entry or current_price)
+        new_stop = max(floor, current_price - atr * atr_multiplier) if atr else floor
+        return ExitDecision(
+            False,
+            "TP1 reached — ATR trail activated",
+            new_stop=new_stop,
+            trailing_active=True,
+            tp1_hit=True,
+        )
+
+    return None
+
+
 class FixedRiskDynamicFloor:
     name = "Fixed Risk then Dynamic Protective Floor"
 
@@ -64,30 +96,9 @@ class FixedRiskDynamicFloor:
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
-        trending = _is_trending(ohlcv)
-        tp1_hit = milestone.get("tp1_hit", False)
-
-        if not tp1_hit and tp1 and current_price >= tp1:
-            new_stop = max(stop, entry)
-            return ExitDecision(
-                False, "TP1 reached, stop promoted to entry",
-                new_stop=new_stop,
-            )
-
-        if tp1_hit:
-            trailing_stop = milestone.get("trailing_stop")
-            if trailing_stop:
-                trail = float(trailing_stop)
-                if _stop_confirmed(current_price, trail, ohlcv):
-                    return ExitDecision(True, f"Trailing floor hit at {trail:.4f}")
-                if trending and atr:
-                    updated_trail = max(trail, current_price - atr * 1.5)
-                    if updated_trail > trail:
-                        return ExitDecision(
-                            False, "Trailing floor raised",
-                            new_stop=updated_trail,
-                            trailing_active=True,
-                        )
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv, atr_multiplier=1.5)
+        if tp1_decision:
+            return tp1_decision
 
         return ExitDecision(False, "Holding")
 
@@ -140,6 +151,10 @@ class FailedFollowThroughExit:
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
+        if tp1_decision:
+            return tp1_decision
+
         if len(ohlcv) < 3:
             return ExitDecision(False, "Holding")
 
@@ -158,6 +173,10 @@ class RangeFailureExit:
         stop = position.current_stop or position.initial_stop
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
+
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
+        if tp1_decision:
+            return tp1_decision
 
         if len(ohlcv) < 10:
             return ExitDecision(False, "Holding")
@@ -179,6 +198,10 @@ class TimeDegradationExit:
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
+        if tp1_decision:
+            return tp1_decision
+
         if position.entry_time and position.max_hold_hours:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             hours_held = (now - position.entry_time).total_seconds() / 3600
@@ -196,6 +219,10 @@ class RegimeBreakdownExit:
         stop = position.current_stop or position.initial_stop
         if _stop_confirmed(current_price, stop, ohlcv):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
+
+        tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
+        if tp1_decision:
+            return tp1_decision
 
         regime_at_entry = position.regime_at_entry or ""
         if "trending_up" in regime_at_entry and len(ohlcv) >= 50:

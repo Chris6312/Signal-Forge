@@ -34,7 +34,7 @@ const statusConfig: Record<
 }
 
 export default function MarketStatusBadge() {
-  const { data } = useQuery<MarketStatusResponse>({
+  const q = useQuery({
     queryKey: ['market-status'],
     queryFn: fetchMarketStatus,
     // Re-check every 60 s — status only changes on minute boundaries
@@ -42,6 +42,7 @@ export default function MarketStatusBadge() {
     staleTime: 30_000,
   })
 
+  const data = q.data as MarketStatusResponse | undefined
   const status = data?.status ?? 'closed'
   const label  = data?.label  ?? 'Market Closed'
   const cfg    = statusConfig[status]

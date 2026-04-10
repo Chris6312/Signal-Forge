@@ -1,8 +1,21 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
+from zoneinfo import ZoneInfo
+from typing import Any
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import ValidationError, model_validator, AnyUrl
 
 
 class Settings(BaseSettings):
+    """Application settings with runtime validation and helpful defaults.
+
+    Notes:
+    - `ALLOWED_ORIGINS` should be set as a JSON array in the environment when
+      deploying (e.g. ALLOWED_ORIGINS=["https://app.example.com"]). For local
+      development the defaults include localhost entries.
+    - `TIMEZONE` is validated against the system zoneinfo database.
+    """
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     APP_NAME: str = "AI_MULTI_ASSET_BOT"
@@ -44,6 +57,41 @@ class Settings(BaseSettings):
     CRYPTO_MONITOR_INTERVAL: int = 15
     STOCK_MONITOR_INTERVAL: int = 15
     EXIT_WORKER_INTERVAL: int = 30
+
+    # ------------------------------------------------------------------
+    # Runtime validation hooks
+    # ------------------------------------------------------------------
+
+    @model_validator(mode="after")
+    def validate_settings(self) -> "Settings":
+        # Validate timezone string maps to a known ZoneInfo
+        try:
+            _ = ZoneInfo(self.TIMEZONE)
+        except Exception as exc:
+            raise ValidationError([f"Invalid TIMEZONE: {self.TIMEZONE}"])
+
+        # Validate ports
+        if not (1 <= self.APP_PORT <= 65535):
+            raise ValidationError([f"APP_PORT out of range: {self.APP_PORT}"])
+        if not (1 <= self.FRONTEND_PORT <= 65535):
+            raise ValidationError([f"FRONTEND_PORT out of range: {self.FRONTEND_PORT}"])
+
+        # Ensure ALLOWED_ORIGINS is a list of non-empty URL-like strings.
+        cleaned: list[str] = []
+        for v in (self.ALLOWED_ORIGINS or []):
+            if not isinstance(v, str) or not v.strip():
+                continue
+            # Basic scheme validation: allow http(s) only for browser origins
+            if not (v.startswith("http://") or v.startswith("https://")):
+                # allow localhost entries without scheme for convenience
+                if v.startswith("localhost") or v.startswith("127.0.0.1"):
+                    cleaned.append("http://" + v)
+                    continue
+                raise ValidationError([f"ALLOWED_ORIGINS entries must start with http:// or https://: {v}"])
+            cleaned.append(v.rstrip("/"))
+        self.ALLOWED_ORIGINS = cleaned or ["http://localhost:5180", "http://127.0.0.1:5180"]
+
+        return self
 
 
 @lru_cache

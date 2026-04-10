@@ -208,14 +208,13 @@ async def get_last_halt():
 
 
 @router.post("/resume", dependencies=[Depends(require_admin)])
-async def resume_trading():
+async def resume_trading(db: AsyncSession = Depends(get_db_session)):
     """Resume normal trading. Clears halt_mode and reenables trading_enabled."""
     await runtime_state.set_value("trading_enabled", True)
     await runtime_state.set_value("halt_mode", "none")
     # Log audit entry
-    async with get_db_session() as db:
-        await log_event(db, 'SYSTEM_RESUME', 'Trading resumed by operator', source=AuditSource.SYSTEM)
-        await db.commit()
+    await log_event(db, 'SYSTEM_RESUME', 'Trading resumed by operator', source=AuditSource.SYSTEM)
+    await db.commit()
     return {"message": "Trading resumed"}
 
 

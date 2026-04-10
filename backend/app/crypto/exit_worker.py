@@ -107,6 +107,19 @@ class CryptoExitWorker:
 
         decision = evaluate_exit(position, current_price, ohlcv)
 
+        milestone = {**(position.milestone_state or {})}
+        milestone_changed = False
+
+        if decision.tp1_hit and not milestone.get("tp1_hit"):
+            milestone["tp1_hit"] = True
+            milestone["tp1_price"] = current_price
+            milestone_changed = True
+
+        if decision.trailing_active and decision.new_stop is not None:
+            milestone["trailing_stop"] = decision.new_stop
+            milestone["trail_active"] = True
+            milestone_changed = True
+
         if decision.new_stop and decision.new_stop != position.current_stop:
             position.current_stop = decision.new_stop
             await log_event(
@@ -120,11 +133,7 @@ class CryptoExitWorker:
                 event_data={"new_stop": decision.new_stop, "reason": decision.reason},
             )
 
-        if decision.trailing_active:
-            milestone = {**(position.milestone_state or {})}
-            milestone["trailing_stop"] = decision.new_stop
-            # Mark that a dynamic trailing mechanism is active for this runner
-            milestone["trail_active"] = True
+        if milestone_changed:
             position.milestone_state = milestone
 
         if decision.partial and not (position.milestone_state or {}).get("tp1_hit"):

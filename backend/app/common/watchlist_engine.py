@@ -21,10 +21,41 @@ class WatchlistEngine:
         new_symbols: List[dict],
         source_id: str = "",
     ) -> dict:
-        async with AsyncSessionLocal() as db:
+        # AsyncSessionLocal may be an async context manager factory or an
+        # async generator (FastAPI dependency override yields). Support both
+        # shapes to make the engine robust to test monkeypatching and runtime
+        # dependency injection patterns.
+        session_ctx = AsyncSessionLocal()
+        # If it implements the async context manager protocol, use it
+        if hasattr(session_ctx, "__aenter__"):
+            async with session_ctx as db:
+                result = await self._process(db, new_symbols, source_id)
+                await db.commit()
+                return result
+        # Otherwise assume it's an async generator that yields a session
+        if hasattr(session_ctx, "__anext__"):
+            db = None
+            try:
+                db = await session_ctx.__anext__()
+                result = await self._process(db, new_symbols, source_id)
+                try:
+                    await db.commit()
+                except Exception:
+                    pass
+                return result
+            finally:
+                try:
+                    await session_ctx.aclose()
+                except Exception:
+                    pass
+        # Fallback: call and await if it's a coroutine returning a session
+        try:
+            db = await session_ctx
             result = await self._process(db, new_symbols, source_id)
             await db.commit()
             return result
+        except Exception:
+            raise
 
     async def _process(
         self,

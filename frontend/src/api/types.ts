@@ -51,3 +51,84 @@ export interface MonitoringCandidate {
   top_notes?: string | null
   position_or_order_status?: string | null
 }
+
+export interface WatchlistItem {
+  symbol: string
+  asset_class: 'crypto' | 'stock'
+  source_id?: string | null
+  notes?: string | null
+}
+
+export interface LedgerAccount {
+  id: string
+  asset_class: string
+  cash_balance: number
+  fees_total: number
+  realized_pnl: number
+  unrealized_pnl: number
+  last_reconciled_at: string | null
+  updated_at: string | null
+}
+
+export interface LedgerEntry {
+  id: string
+  asset_class: string
+  entry_type: string
+  symbol?: string | null
+  amount: number
+  balance_after: number
+  notes?: string | null
+  created_at?: string | null
+}
+
+export interface Trade {
+  id: string
+  symbol: string
+  asset_class: 'crypto' | 'stock'
+  entry_price?: number | null
+  exit_price?: number | null
+  quantity?: number | null
+  entry_time?: string | null
+  exit_time?: string | null
+  exit_reason?: string | null
+  entry_strategy?: string | null
+  exit_strategy?: string | null
+  pnl_realized?: number | null
+  fees_paid?: number | null
+  regime_at_entry?: string | null
+}
+
+export interface TradeSummary {
+  total_trades: number
+  winners: number
+  losers: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
+export interface AuditEvent {
+  id: string
+  event_type: string
+  asset_class?: 'crypto' | 'stock' | null
+  symbol?: string | null
+  position_id?: string | null
+  source: string
+  event_data?: Record<string, unknown> | null
+  message?: string | null
+  created_at?: string | null
+}
+
+export interface EventTypesResponse {
+  event_types: string[]
+}
+
+export interface RuntimeState {
+  market_open: boolean
+  halted?: boolean
+  [key: string]: unknown
+}
+
+export type ApiListResponse<T> = T[]
+
+export default {} as const

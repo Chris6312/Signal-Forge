@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.crypto.kraken_client import kraken_client
 from app.common.candle_store import CandleStore, TF_MINUTES

@@ -6,7 +6,7 @@ EDT (UTC-4) and EST (UTC-5) transparently via the IANA tz database.
 
 Session windows
 ---------------
-  pre_market   08:30 – 09:30 ET  Pull candles / backfill / prep signals, no new entries
+  pre_market   09:15 – 09:30 ET  Pull candles / backfill / prep signals, no new entries
   open         09:30 – 15:50 ET  Active trading; entries and exits both live
   eod          15:50 – 16:00 ET  EOD exits only; no new entries allowed
   closed       everything else   All stock operations suspended
@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 _EASTERN = ZoneInfo("America/New_York")
 
-_PREP_START   = dt_time(8, 30)   # begin candle pull / backfill / signal prep
+_PREP_START   = dt_time(9, 15)   # begin candle pull / backfill / signal prep
 _MARKET_OPEN  = dt_time(9, 30)   # NYSE regular session open
 _EOD_CUTOFF   = dt_time(15, 50)  # stop new entries, begin EOD exits
 _MARKET_CLOSE = dt_time(16, 0)   # NYSE regular session close

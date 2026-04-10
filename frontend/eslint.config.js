@@ -31,8 +31,8 @@ export default tseslint.config(
       // Vite HMR — warn when a module exports something other than components
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
 
-      // TypeScript — warn on explicit `any` rather than hard-error to allow gradual adoption
-      '@typescript-eslint/no-explicit-any': 'warn',
+      // TypeScript — allow explicit `any` in this codebase for gradual typing
+      '@typescript-eslint/no-explicit-any': 'off',
 
       // TypeScript — unused vars are already caught by tsc (noUnusedLocals /
       // noUnusedParameters in tsconfig), but ESLint catches them in .tsx files

@@ -9,21 +9,12 @@ import {
   SortingState,
 } from '@tanstack/react-table'
 import { fetchAuditEvents, fetchEventTypes } from '@/api/endpoints'
+import { AuditEvent } from '@/api/types'
 import { RefreshCw, Filter, FileText, ChevronRight, ChevronDown, TerminalSquare, ArrowUpDown } from 'lucide-react'
 import { formatET, relativeTime } from '@/utils/time'
 import clsx from 'clsx'
 
-interface AuditEvent {
-  id: string
-  event_type: string
-  asset_class: string | null
-  symbol: string | null
-  position_id: string | null
-  source: string
-  event_data: Record<string, unknown> | null
-  message: string | null
-  created_at: string | null
-}
+
 
 const sourceColors: Record<string, string> = {
   SYSTEM: 'bg-gray-500/10 text-gray-400 border-gray-500/30',
@@ -43,7 +34,7 @@ const eventTypeColors: Record<string, string> = {
   WATCHLIST_SYMBOL_REMOVED: 'text-system-offline',
 }
 
-const columnHelper = createColumnHelper<AuditEvent>()
+const columnHelper = createColumnHelper()
 
 export default function AuditTrail() {
   const [filterType, setFilterType] = useState('')
@@ -52,7 +43,7 @@ export default function AuditTrail() {
   const [filterClass, setFilterClass] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
   const [filtersOpen, setFiltersOpen] = useState(false)
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'created_at', desc: true }])
+  const [sorting, setSorting] = useState<any>([{ id: 'created_at', desc: true }])
 
   const params: Record<string, string> = { limit: '200' }
   if (filterType) params.event_type = filterType
@@ -60,16 +51,41 @@ export default function AuditTrail() {
   if (filterSource) params.source = filterSource
   if (filterClass) params.asset_class = filterClass
 
-  const { data: events = [], isLoading, isRefetching, refetch } = useQuery<AuditEvent[]>({
+  const q = useQuery({
     queryKey: ['audit', filterType, filterSymbol, filterSource, filterClass],
     queryFn: () => fetchAuditEvents(params),
     refetchInterval: 15000,
-  })
+  }) as { data?: AuditEvent[]; isLoading?: boolean; isRefetching?: boolean; refetch?: () => Promise<any> }
+  const events = q.data ?? []
+  const isLoading = q.isLoading
+  const isRefetching = q.isRefetching
+  const refetch = q.refetch
 
-  const { data: typesData } = useQuery<{ event_types: string[] }>({
-    queryKey: ['audit-event-types'],
-    queryFn: fetchEventTypes,
-  })
+  const exportCSV = () => {
+    const rows = [
+      ['Timestamp','Event Type','Source','Asset Class','Symbol','Position ID','Message','Event Data'],
+      ...events.map(e => [
+        e.created_at ? new Date(e.created_at).toISOString() : '',
+        e.event_type,
+        e.source,
+        e.asset_class || '',
+        e.symbol || '',
+        e.position_id || '',
+        `"${(e.message || '').replace(/"/g,'""')}"`,
+        `"${JSON.stringify(e.event_data || {}).replace(/"/g,'""')}"`,
+      ])
+    ]
+    const csv = rows.map(r => r.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `forge_audit_${filterType || 'all'}_${new Date().getTime()}.csv`
+    a.click()
+  }
+
+  const qTypes = useQuery({ queryKey: ['audit-event-types'], queryFn: fetchEventTypes }) as { data?: { event_types: string[] } }
+  const typesData = qTypes.data
 
   const columns = useMemo(() => [
     columnHelper.accessor('created_at', {
@@ -171,6 +187,10 @@ export default function AuditTrail() {
           <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
             <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
             <span className="mono text-xs uppercase tracking-wider">Sync Logs</span>
+          </button>
+          <button onClick={exportCSV} className="btn-ghost flex items-center gap-2 px-3">
+            <FileText size={14} />
+            <span className="mono text-xs uppercase tracking-wider">Export CSV</span>
           </button>
         </div>
       </div>

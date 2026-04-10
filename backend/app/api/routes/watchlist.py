@@ -38,7 +38,20 @@ async def get_active_symbols(db: AsyncSession = Depends(get_db_session)):
 
 @router.post("/update", response_model=WatchlistUpdateOut)
 async def update_watchlist(body: WatchlistUpdateIn):
-    result = await watchlist_engine.process_update(body.watchlist, source_id=body.source_id)
+    # body.watchlist contains Pydantic models; convert to plain dicts so
+    # watchlist_engine (which expects dicts and uses item.get(...)) can
+    # operate without attribute errors.
+    incoming = []
+    for item in body.watchlist:
+        # Pydantic v2 exposes model_dump(); fall back to dict() for v1
+        if hasattr(item, "model_dump"):
+            incoming.append(item.model_dump())
+        elif hasattr(item, "dict"):
+            incoming.append(item.dict())
+        else:
+            incoming.append(item)
+
+    result = await watchlist_engine.process_update(incoming, source_id=body.source_id)
     return WatchlistUpdateOut(**result)
 
 

@@ -11,9 +11,9 @@ function GlobalHeader() {
   const { status } = useWebSocket()
 
   return (
-    <header className="h-14 border-b border-surface-border bg-surface-card/40 flex items-center justify-between px-6 shrink-0 z-20 backdrop-blur-md">
+    <header className="h-14 border-b border-surface-border bg-surface-card/40 flex items-center justify-between px-3 sm:px-4 lg:px-6 shrink-0 z-20 backdrop-blur-md min-w-0 overflow-hidden">
       {/* Live WSS Telemetry Indicator */}
-      <div className="flex items-center gap-3 text-xs mono">
+      <div className="flex items-center gap-3 text-xs mono min-w-0">
         {status === 'connected' ? (
           <>
             <Activity size={14} className="text-system-online animate-pulse-slow drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
@@ -36,9 +36,9 @@ function GlobalHeader() {
       </div>
       
       {/* Right side of header - Global Controls */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 md:gap-4 min-w-0 shrink-0">
         {/* Omnibar Hint */}
-        <div className="hidden md:flex items-center gap-1.5 text-[10px] mono text-gray-500 bg-surface border border-surface-border px-2 py-1 rounded">
+        <div className="hidden 2xl:flex items-center gap-1.5 text-[10px] mono text-gray-500 bg-surface border border-surface-border px-2 py-1 rounded shrink-0">
           <CmdIcon size={10} />
           <span>+ K to Command</span>
         </div>
@@ -54,14 +54,14 @@ export default function Layout() {
   return (
     <div className="flex h-screen bg-surface overflow-hidden selection:bg-brand selection:text-white">
       <Sidebar />
-      <div className="flex-1 flex flex-col h-full relative">
+      <div className="flex-1 flex flex-col h-full relative min-w-0">
         <WebSocketProvider>
           <GlobalHeader />
-          <main className="flex-1 overflow-auto relative">
+          <main className="flex-1 overflow-y-auto overflow-x-hidden relative min-w-0">
             {/* Ambient Background Glow for depth */}
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[300px] bg-brand/5 blur-[120px] pointer-events-none z-0 rounded-full"></div>
             
-            <div className="max-w-[1600px] mx-auto px-6 py-6 pb-20 relative z-10">
+            <div className="w-full max-w-full 2xl:max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-6 py-6 pb-20 relative z-10 min-w-0">
               <Outlet />
             </div>
           </main>

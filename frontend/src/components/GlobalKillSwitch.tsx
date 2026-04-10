@@ -30,12 +30,13 @@ export default function GlobalKillSwitch() {
       {/* The Hardware-Style Button */}
       <button
         onClick={() => setIsOpen(true)}
-        className="relative overflow-hidden bg-system-offline hover:bg-red-600 text-white font-bold py-1.5 px-4 rounded border border-red-400/50 shadow-[0_0_15px_-3px_rgba(239,68,68,0.4)] hover:shadow-[0_0_20px_-3px_rgba(239,68,68,0.6)] transition-all flex items-center gap-2 text-sm uppercase tracking-wider group"
+        className="relative overflow-hidden bg-system-offline hover:bg-red-600 text-white font-bold py-1.5 px-3 md:px-4 rounded border border-red-400/50 shadow-[0_0_15px_-3px_rgba(239,68,68,0.4)] hover:shadow-[0_0_20px_-3px_rgba(239,68,68,0.6)] transition-all flex items-center gap-2 text-sm uppercase tracking-wider group shrink-0"
       >
         {/* CSS Hazard Stripes */}
         <div className="absolute inset-0 opacity-20 bg-[repeating-linear-gradient(45deg,transparent,transparent_8px,#000_8px,#000_16px)] pointer-events-none group-hover:opacity-30 transition-opacity"></div>
         <AlertOctagon size={16} className="relative z-10 animate-pulse" />
-        <span className="relative z-10 mono text-xs mt-0.5">INITIATE_GLOBAL_HALT (soft)</span>
+        <span className="relative z-10 mono text-xs mt-0.5 hidden xl:inline">INITIATE_GLOBAL_HALT (soft)</span>
+        <span className="relative z-10 mono text-xs mt-0.5 xl:hidden">HALT</span>
       </button>
 
       {/* The Confirmation Modal */}

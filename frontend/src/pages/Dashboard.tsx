@@ -67,17 +67,15 @@ export default function Dashboard() {
   const { status: wsStatus } = useWebSocket()
   
   // Notice: refetchInterval has been REMOVED. WSS now drives data invalidation.
-  const { data, isLoading, isError, dataUpdatedAt, refetch } = useQuery<DashboardData>({
-    queryKey: ['dashboard'],
-    queryFn: fetchDashboard,
-    staleTime: Infinity, // Data remains fresh until WSS tells us otherwise
-  })
+  const qDash = useQuery({ queryKey: ['dashboard'], queryFn: fetchDashboard, staleTime: Infinity }) as { data?: DashboardData; isLoading?: boolean; isError?: boolean; dataUpdatedAt?: number; refetch?: () => Promise<any> }
+  const data = qDash.data
+  const isLoading = qDash.isLoading
+  const isError = qDash.isError
+  const dataUpdatedAt = qDash.dataUpdatedAt
+  const refetch = qDash.refetch
 
-  const { data: marketData } = useQuery<MarketStatusResponse>({
-    queryKey: ['market-status'],
-    queryFn: fetchMarketStatus,
-    staleTime: Infinity,
-  })
+  const qMarket = useQuery({ queryKey: ['market-status'], queryFn: fetchMarketStatus, staleTime: Infinity }) as { data?: MarketStatusResponse }
+  const marketData = qMarket.data
   const ms = marketData?.status ?? 'open'
 
   const cryptoPnl = data?.pnl.find(p => p.asset_class === 'crypto')

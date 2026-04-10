@@ -50,6 +50,9 @@ POSTGRES_PASSWORD=changeme          # Change in production
 
 TIMEZONE=America/New_York
 
+# Allowed browser origins (CORS). Set as a JSON array:
+ALLOWED_ORIGINS=["http://localhost:5180","http://127.0.0.1:5180"]
+
 # ── Discord ────────────────────────────────────────────────────────────────────
 DISCORD_BOT_TOKEN=                  # Bot token from Discord Developer Portal
 DISCORD_TRADING_CHANNEL_ID=0        # ID of the channel the bot reads from

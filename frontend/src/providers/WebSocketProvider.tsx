@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -23,6 +24,7 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
   const [lastMessageTime, setLastMessageTime] = useState<number | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
+  const connectedRef = useRef<boolean>(false)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const queryClient = useQueryClient()
 
@@ -39,6 +41,7 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
 
       ws.onopen = () => {
         setStatus('connected')
+        connectedRef.current = true
         reconnectAttempts = 0
 
         // Ensure critical queries are refreshed after reconnect
@@ -138,12 +141,13 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
       }
 
       ws.onclose = () => {
-        if (status === 'connected') {
+        if (connectedRef.current) {
           toast.error('[SYS_ERR] Uplink Severed', {
             description: 'Attempting to re-establish connection...',
           })
         }
 
+        connectedRef.current = false
         setStatus('disconnected')
 
         const timeout = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)

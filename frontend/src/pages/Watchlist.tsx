@@ -1,4 +1,5 @@
-import { useState, useMemo } from 'react'
+/** @jsxImportSource react */
+import { useState, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   createColumnHelper,
@@ -9,10 +10,10 @@ import {
   useReactTable,
   SortingState,
 } from '@tanstack/react-table'
-import { fetchWatchlist, postWatchlistUpdate } from '@/api/endpoints'
-import StatusBadge from '@/components/StatusBadge'
-import { RefreshCw, Search, Crosshair, TerminalSquare, Activity, ArrowUpDown } from 'lucide-react'
-import { formatET, relativeTime } from '@/utils/time'
+import { fetchWatchlist, postWatchlistUpdate } from '../api/endpoints'
+import StatusBadge from '../components/StatusBadge'
+import { RefreshCw, Search, Crosshair, TerminalSquare, Activity, ArrowUpDown, X } from 'lucide-react'
+import { formatET, relativeTime } from '../utils/time'
 import clsx from 'clsx'
 
 interface WatchlistSymbol {
@@ -29,6 +30,15 @@ interface WatchlistSymbol {
   tags?: string[] | null
 }
 
+function DrawerField({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="border border-surface-border rounded p-3 bg-surface-card/30">
+      <div className="text-[10px] uppercase tracking-widest text-gray-500 mono mb-1">{label}</div>
+      <div className={clsx("text-gray-200", mono && "mono text-xs")}>{value}</div>
+    </div>
+  )
+}
+
 const EXAMPLE_PAYLOAD = JSON.stringify(
   {
     watchlist: [
@@ -42,34 +52,37 @@ const EXAMPLE_PAYLOAD = JSON.stringify(
   2,
 )
 
-const columnHelper = createColumnHelper<WatchlistSymbol>()
+const columnHelper = createColumnHelper()
 
 export default function Watchlist() {
   const qc = useQueryClient()
   const [filterState, setFilterState] = useState<string>('')
   const [filterClass, setFilterClass] = useState<string>('')
   const [globalFilter, setGlobalFilter] = useState('')
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'added_at', desc: true }])
+  const [sorting, setSorting] = useState<any>([{ id: 'added_at', desc: true }])
   const [tagFilter, setTagFilter] = useState<string>('')
   const [confidenceSort, setConfidenceSort] = useState<'none' | 'asc' | 'desc'>('none')
   
   const [jsonInput, setJsonInput] = useState(EXAMPLE_PAYLOAD)
   const [jsonOpen, setJsonOpen] = useState(false)
   const [updateResult, setUpdateResult] = useState<string | null>(null)
+  const [selectedRow, setSelectedRow] = useState<WatchlistSymbol | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const params: Record<string, string> = {}
   if (filterState) params.state = filterState
   if (filterClass) params.asset_class = filterClass
 
-  const { data = [], isLoading, isRefetching, refetch } = useQuery<WatchlistSymbol[]>({
+  const { data: dataRaw = [], isLoading, isRefetching, refetch } = useQuery({
     queryKey: ['watchlist', filterState, filterClass],
     queryFn: () => fetchWatchlist(params),
     refetchInterval: 15000,
   })
+  const data = dataRaw as WatchlistSymbol[]
 
   const mutation = useMutation({
     mutationFn: (body: { watchlist: object[]; source_id: string }) => postWatchlistUpdate(body),
-    onSuccess: (result) => {
+    onSuccess: (result: any) => {
       setUpdateResult(`[SYS_SUCCESS] Payload accepted. \n${JSON.stringify(result, null, 2)}`)
       qc.invalidateQueries({ queryKey: ['watchlist'] })
     },
@@ -81,7 +94,37 @@ export default function Watchlist() {
   const handleSubmit = () => {
     try {
       const parsed = JSON.parse(jsonInput)
-      mutation.mutate({ watchlist: parsed.watchlist, source_id: 'manual' })
+
+      // Accept multiple incoming shapes:
+      // - object with "watchlist" (standard frontend form)
+      // - object with "symbols" (AI/Discord schema)
+      // - raw array of items
+      let items: any[] | null = null
+      if (Array.isArray(parsed)) {
+        items = parsed
+      } else if (parsed.watchlist || parsed.symbols) {
+        items = parsed.watchlist ?? parsed.symbols
+      }
+      if (!items || !Array.isArray(items)) {
+        throw new Error('Payload must contain a top-level "watchlist" or "symbols" array, or be an array of items')
+      }
+
+      // Normalize items to allowed fields to avoid backend model validation failures
+      const normalized = items.map(i => ({
+        symbol: i.symbol,
+        asset_class: i.asset_class,
+        reason: i.reason,
+        confidence: i.confidence,
+        tags: i.tags,
+        notes: i.notes,
+      }))
+
+      const body = {
+        watchlist: normalized,
+        source_id: parsed.source_id ?? parsed.source ?? 'manual',
+      }
+
+      mutation.mutate(body)
     } catch {
       setUpdateResult('[SYS_ERROR] Invalid JSON payload sequence.')
     }
@@ -104,36 +147,11 @@ export default function Watchlist() {
       header: 'STATUS',
       cell: info => <StatusBadge status={info.getValue()} />,
     }),
-    columnHelper.accessor('asset_class', {
-      header: 'NODE',
-      cell: info => <span className="text-xs text-gray-400 uppercase tracking-widest">{info.getValue()}</span>
-    }),
-    columnHelper.accessor('watchlist_source_id', {
-      header: 'ORIGIN_ID',
-      cell: info => <span className="text-[10px] text-gray-500 font-mono bg-surface-card border border-surface-border px-1.5 py-0.5 rounded">{info.getValue() || 'MANUAL'}</span>,
-    }),
-    columnHelper.accessor('reason', {
-      header: 'REASON',
-      cell: info => <span className="text-[12px] text-gray-300 max-w-[280px] truncate inline-block">{info.getValue() || '—'}</span>,
-    }),
     columnHelper.accessor('confidence', {
       header: 'CONF',
       cell: info => {
         const v = info.getValue()
         return v == null ? <span className="text-gray-500">—</span> : <span className="text-xs font-mono text-white">{(v as number).toFixed(2)}</span>
-      }
-    }),
-    columnHelper.accessor('tags', {
-      header: 'TAGS',
-      cell: info => {
-        const tags = info.getValue() as string[] | null
-        if (!tags || tags.length === 0) return <span className="text-gray-500">—</span>
-        return (
-          <div className="flex items-center gap-2">
-            {tags.slice(0,3).map(t => <span key={t} className="text-[10px] px-2 py-0.5 rounded bg-surface-card border border-surface-border text-gray-300">{t}</span>)}
-            {tags.length > 3 && <span className="text-[10px] text-gray-500">+{tags.length - 3}</span>}
-          </div>
-        )
       }
     }),
     columnHelper.accessor('added_at', {
@@ -167,7 +185,7 @@ export default function Watchlist() {
     let rows = data
     if (tagFilter) {
       const q = tagFilter.trim().toLowerCase()
-      rows = rows.filter(r => Array.isArray(r.tags) && r.tags.map((t: string) => t.toLowerCase()).includes(q))
+      rows = rows.filter((r: WatchlistSymbol) => Array.isArray(r.tags) && r.tags.map((t: string) => t.toLowerCase()).includes(q))
     }
     if (confidenceSort !== 'none') {
       rows = [...rows].sort((a, b) => {
@@ -190,13 +208,13 @@ export default function Watchlist() {
     getFilteredRowModel: getFilteredRowModel(),
   })
 
-  const active = data.filter(s => s.state === 'ACTIVE')
-  const managed = data.filter(s => s.state === 'MANAGED')
+  const active = data.filter((s: WatchlistSymbol) => s.state === 'ACTIVE')
+  const managed = data.filter((s: WatchlistSymbol) => s.state === 'MANAGED')
 
   return (
-    <div className="space-y-6 max-w-[1600px] mx-auto pb-10 h-full flex flex-col">
+    <div className="space-y-6 w-full max-w-[1600px] mx-auto pb-10 h-full flex flex-col min-w-0 overflow-x-hidden">
       {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0">
+      <div className="flex flex-col 2xl:flex-row 2xl:items-end justify-between gap-4 border-b border-surface-border pb-4 shrink-0 min-w-0">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight flex items-center gap-3">
             <Crosshair className="text-brand" /> 
@@ -209,25 +227,25 @@ export default function Watchlist() {
           </div>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 md:gap-3 flex-wrap min-w-0 justify-start 2xl:justify-end">
           {/* Omni-Filter */}
-          <div className="relative group hidden md:block">
+          <div className="relative group hidden 2xl:block min-w-0">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 group-focus-within:text-brand transition-colors" />
             <input
               type="text"
               value={globalFilter ?? ''}
               onChange={e => setGlobalFilter(e.target.value)}
               placeholder="Scan array..."
-              className="bg-[#12141f] border border-surface-border rounded-lg py-1.5 pl-9 pr-4 text-white font-mono text-sm focus:outline-none focus:border-brand/50 focus:ring-1 focus:ring-brand/50 w-48 transition-all"
+            className="bg-[#12141f] border border-surface-border rounded-lg py-1.5 pl-9 pr-4 text-white font-mono text-sm focus:outline-none focus:border-brand/50 focus:ring-1 focus:ring-brand/50 w-[180px] max-w-full transition-all"
             />
           </div>
-          <div className="w-[1px] h-6 bg-surface-border"></div>
-          <div className="flex items-center gap-2">
+          <div className="hidden 2xl:block w-[1px] h-6 bg-surface-border"></div>
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
             <input
               placeholder="Filter tag..."
               value={tagFilter}
               onChange={e => setTagFilter(e.target.value)}
-              className="bg-[#12141f] border border-surface-border rounded px-2 py-1 text-xs mono text-gray-300 focus:outline-none"
+            className="bg-[#12141f] border border-surface-border rounded px-2 py-1 text-xs mono text-gray-300 focus:outline-none w-[140px] max-w-full"
             />
             <div className="flex items-center gap-1">
               <button
@@ -248,15 +266,15 @@ export default function Watchlist() {
       </div>
 
       {/* Manual Override Console */}
-      <div className="card space-y-4 bg-[#0d0f18] shrink-0 border-brand/20">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex gap-2 bg-[#12141f] p-1 rounded-lg border border-surface-border self-start">
+      <div className="card space-y-4 bg-[#0d0f18] shrink-0 border-brand/20 min-w-0">
+        <div className="flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-4 min-w-0">
+          <div className="flex gap-2 bg-[#12141f] p-1 rounded-lg border border-surface-border self-start w-full 2xl:w-auto overflow-x-auto">
             {['', 'ACTIVE', 'MANAGED'].map(s => (
               <button
                 key={s}
                 onClick={() => setFilterState(s)}
                 className={clsx(
-                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all shrink-0",
                   filterState === s 
                     ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
                     : "text-gray-500 hover:text-gray-300 border border-transparent"
@@ -271,7 +289,7 @@ export default function Watchlist() {
                 key={c}
                 onClick={() => setFilterClass(c)}
                 className={clsx(
-                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all",
+                  "px-4 py-1.5 rounded-md text-[10px] font-mono uppercase tracking-widest transition-all shrink-0",
                   filterClass === c 
                     ? "bg-brand/20 text-brand font-bold border border-brand/30 shadow-[0_0_10px_rgba(99,102,241,0.2)]" 
                     : "text-gray-500 hover:text-gray-300 border border-transparent"
@@ -284,7 +302,7 @@ export default function Watchlist() {
 
           <button
             onClick={() => setJsonOpen(o => !o)}
-            className="flex items-center gap-2 text-xs font-mono font-bold tracking-widest uppercase text-brand hover:text-white transition-colors px-3 py-1.5 rounded border border-brand/30 hover:bg-brand/10"
+            className="flex items-center gap-2 text-xs font-mono font-bold tracking-widest uppercase text-brand hover:text-white transition-colors px-3 py-1.5 rounded border border-brand/30 hover:bg-brand/10 self-start 2xl:self-auto shrink-0"
           >
             <TerminalSquare size={14} />
             {jsonOpen ? 'Close Terminal' : 'Inject Payload'}
@@ -311,11 +329,49 @@ export default function Watchlist() {
               onChange={e => setJsonInput(e.target.value)}
               spellCheck="false"
             />
-            
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={e => {
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  const reader = new FileReader()
+                  reader.onload = () => {
+                    try {
+                      const text = reader.result as string
+                      JSON.parse(text)
+                      setJsonInput(text)
+                      setUpdateResult('[SYS_INFO] Payload loaded from file.')
+                  } catch {
+                      setUpdateResult('[SYS_ERROR] Uploaded file is not valid JSON.')
+                    }
+                  }
+                  reader.readAsText(f)
+                  // reset input so same file can be re-selected later
+                  e.currentTarget.value = ''
+                }}
+              />
+
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="btn-ghost text-xs mono px-3 py-2 border border-surface-border rounded"
+              >
+                Upload JSON
+              </button>
+
               <button onClick={handleSubmit} className="btn-primary flex items-center gap-2 py-2 px-6" disabled={mutation.isPending}>
                 {mutation.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Activity size={14} />}
                 <span className="mono text-xs uppercase tracking-widest font-bold">Execute Injection</span>
+              </button>
+
+              <button
+                onClick={() => { setJsonInput(''); setUpdateResult(null) }}
+                className="btn-ghost text-xs mono px-3 py-2 border border-surface-border rounded"
+              >
+                Clear
               </button>
             </div>
 
@@ -332,7 +388,7 @@ export default function Watchlist() {
       </div>
 
       {/* Target Data Grid */}
-      <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset">
+      <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset min-w-0">
         {isLoading ? (
           <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3 min-h-[400px]">
              <Activity className="animate-pulse-slow text-brand" size={32} />
@@ -343,8 +399,8 @@ export default function Watchlist() {
             No Targets Identified On Radar
           </div>
         ) : (
-          <div className="overflow-auto flex-1 scrollbar-thin">
-            <table className="w-full text-left border-collapse">
+          <div className="overflow-x-auto overflow-y-auto flex-1 scrollbar-thin min-w-0">
+            <table className="min-w-full w-max text-left border-collapse">
               <thead className="sticky top-0 z-20 bg-[#0b0c13] border-b border-surface-border">
                 {table.getHeaderGroups().map(headerGroup => (
                   <tr key={headerGroup.id}>
@@ -381,14 +437,22 @@ export default function Watchlist() {
                       const ageMs = Date.now() - then
                       // Mark stale if older than 7 days
                       isStale = ageMs > 7 * 24 * 60 * 60 * 1000
-                    } catch (err) {
-                      console.debug('Watchlist: failed to parse added_at', err)
+                    } catch {
+                      console.debug('Watchlist: failed to parse added_at')
                     }
                   }
                   return (
-                    <tr key={row.id} className={clsx("border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group", isStale && "bg-yellow-900/5") }>
+                    <tr
+                      key={row.id}
+                      className={clsx(
+                        "border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group cursor-pointer",
+                        isStale && "bg-yellow-900/5",
+                        selectedRow?.id === row.original.id && "bg-brand/5"
+                      )}
+                      onClick={() => setSelectedRow(row.original)}
+                    >
                       {row.getVisibleCells().map(cell => (
-                        <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                        <td key={cell.id} className="py-2.5 px-5">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
@@ -405,6 +469,40 @@ export default function Watchlist() {
           <span>Matrix Status: <span className="text-system-online">Active</span></span>
         </div>
       </div>
+
+      {selectedRow && (
+        <div className="fixed inset-0 z-40">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setSelectedRow(null)} />
+          <aside className="absolute right-0 top-0 h-full w-full max-w-md bg-[#0b0c13] border-l border-surface-border shadow-2xl p-5 overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm mono uppercase tracking-widest text-brand">Target Details</h3>
+              <button onClick={() => setSelectedRow(null)} className="text-gray-400 hover:text-white">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-sm">
+              <DrawerField label="Symbol" value={selectedRow.symbol} />
+              <DrawerField label="Status" value={selectedRow.state} />
+              <DrawerField label="Asset Class" value={selectedRow.asset_class} />
+              <DrawerField label="Origin ID" value={selectedRow.watchlist_source_id || 'MANUAL'} mono />
+              <DrawerField label="Reason" value={selectedRow.reason || '—'} />
+              <DrawerField
+                label="Tags"
+                value={
+                  selectedRow.tags && selectedRow.tags.length > 0
+                    ? selectedRow.tags.join(', ')
+                    : '—'
+                }
+              />
+              <DrawerField label="Confidence" value={selectedRow.confidence == null ? '—' : selectedRow.confidence.toFixed(2)} mono />
+              <DrawerField label="Acquired At" value={selectedRow.added_at ? formatET(selectedRow.added_at) : '—'} />
+              <DrawerField label="Managed Since" value={selectedRow.managed_since ? formatET(selectedRow.managed_since) : '—'} />
+              <DrawerField label="Removed At" value={selectedRow.removed_at ? formatET(selectedRow.removed_at) : '—'} />
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   )
 }

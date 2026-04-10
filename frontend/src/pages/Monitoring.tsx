@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   createColumnHelper,
@@ -50,12 +50,12 @@ interface EvalResult {
   error?: string
 }
 
-const columnHelper = createColumnHelper<Candidate>()
+const columnHelper = createColumnHelper()
 
 export default function Monitoring() {
   const [filterClass, setFilterClass] = useState<string>('')
   const [globalFilter, setGlobalFilter] = useState('')
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'top_confidence', desc: true }])
+  const [sorting, setSorting] = useState<any>([{ id: 'top_confidence', desc: true }])
   
   const [evalSymbol, setEvalSymbol] = useState('')
   const [evalClass, setEvalClass] = useState<'crypto' | 'stock'>('crypto')
@@ -65,23 +65,60 @@ export default function Monitoring() {
   const params: Record<string, string> = {}
   if (filterClass) params.asset_class = filterClass
 
-  const { data, isLoading, isRefetching, refetch } = useQuery<{ candidates: Candidate[]; total: number }>({
+  const q = useQuery({
     queryKey: ['monitoring', filterClass],
     queryFn: () => fetchMonitoringCandidates(params),
     refetchInterval: 30000,
-  })
+  }) as { data?: { candidates: Candidate[]; total: number }; isLoading?: boolean; isRefetching?: boolean; refetch?: () => Promise<any> }
+  const data = q.data
+  const isLoading = q.isLoading
+  const isRefetching = q.isRefetching
+  const refetch = q.refetch
 
-  const handleEvaluate = async (targetSymbol?: string, targetClass?: 'crypto' | 'stock') => {
+  const strongestCandidates = useMemo(() => {
+    const rows = data?.candidates ?? []
+    const bestBySymbol = new Map<string, Candidate>()
+
+    for (const row of rows) {
+      const key = row.symbol?.toUpperCase() ?? ''
+      const current = bestBySymbol.get(key)
+
+      if (!current) {
+        bestBySymbol.set(key, row)
+        continue
+      }
+
+      const currentConfidence = current.top_confidence ?? Number.NEGATIVE_INFINITY
+      const nextConfidence = row.top_confidence ?? Number.NEGATIVE_INFINITY
+
+      if (nextConfidence > currentConfidence) {
+        bestBySymbol.set(key, row)
+        continue
+      }
+
+      if (nextConfidence === currentConfidence) {
+        const currentAddedAt = current.added_at ? new Date(current.added_at).getTime() : Number.NEGATIVE_INFINITY
+        const nextAddedAt = row.added_at ? new Date(row.added_at).getTime() : Number.NEGATIVE_INFINITY
+        if (nextAddedAt > currentAddedAt) {
+          bestBySymbol.set(key, row)
+        }
+      }
+    }
+
+    return Array.from(bestBySymbol.values())
+  }, [data?.candidates])
+
+  const handleEvaluate = useCallback(async (targetSymbol?: string, targetClass?: 'crypto' | 'stock') => {
     const sym = targetSymbol || evalSymbol
     const cls = targetClass || evalClass
-    
+
     if (!sym.trim()) return
-    
+
     setEvalSymbol(sym.toUpperCase())
     setEvalClass(cls)
     setEvalLoading(true)
     setEvalResult(null)
-    
+
     try {
       const result = await evaluateSymbol(sym.trim().toUpperCase(), cls)
       setEvalResult(result)
@@ -90,7 +127,7 @@ export default function Monitoring() {
     } finally {
       setEvalLoading(false)
     }
-  }
+  }, [evalSymbol, evalClass])
 
   const columns = useMemo(() => [
     columnHelper.accessor('symbol', {
@@ -176,10 +213,10 @@ export default function Monitoring() {
         </button>
       )
     })
-  ], [])
+  ], [handleEvaluate])
 
   const table = useReactTable({
-    data: data?.candidates ?? [],
+    data: strongestCandidates,
     columns,
     state: { sorting, globalFilter },
     onSortingChange: setSorting,
@@ -199,7 +236,7 @@ export default function Monitoring() {
             Live Telemetry
           </h1>
           <div className="flex items-center gap-3 mt-2 mono text-xs text-gray-500">
-            <span>ACTIVE_CANDIDATES: <span className="text-white">{data?.total ?? 0}</span></span>
+            <span>ACTIVE_CANDIDATES: <span className="text-white">{strongestCandidates.length}</span></span>
             <span>|</span>
             <span className="text-system-online animate-pulse">MONITORING_NODES_ONLINE</span>
           </div>
@@ -352,7 +389,7 @@ export default function Monitoring() {
              <Activity className="animate-pulse-slow text-brand" size={32} />
              <span className="mono text-xs uppercase tracking-widest">Polling Telemetry Nodes...</span>
           </div>
-        ) : (data?.candidates ?? []).length === 0 ? (
+        ) : strongestCandidates.length === 0 ? (
           <div className="flex-1 flex items-center justify-center text-gray-500 mono text-sm uppercase tracking-widest min-h-[300px]">
             No Telemetry Data Available
           </div>

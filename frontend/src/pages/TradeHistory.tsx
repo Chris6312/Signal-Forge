@@ -6,41 +6,20 @@ import {
   getCoreRowModel,
   getSortedRowModel,
   useReactTable,
-  SortingState,
 } from '@tanstack/react-table'
 import { fetchTradeHistory, fetchTradeSummary } from '@/api/endpoints'
+import { Trade, TradeSummary } from '@/api/types'
 import MetricCard from '@/components/MetricCard'
 import { RefreshCw, Download, Clock, ArrowUpDown, Activity } from 'lucide-react'
 import { formatET, relativeTime } from '@/utils/time'
 import clsx from 'clsx'
 
-interface Trade {
-  id: string
-  symbol: string
-  asset_class: string
-  entry_price: number | null
-  exit_price: number | null
-  quantity: number | null
-  entry_time: string | null
-  exit_time: string | null
-  exit_reason: string | null
-  entry_strategy: string | null
-  exit_strategy: string | null
-  pnl_realized: number | null
-  fees_paid: number | null
-  regime_at_entry: string | null
-}
+// Use shared types
+type LocalSummary = TradeSummary
 
-interface Summary {
-  total_trades: number
-  winners: number
-  losers: number
-  win_rate: number
-  total_pnl: number
-  avg_pnl: number
-}
+const columnHelper = createColumnHelper()
 
-const columnHelper = createColumnHelper<Trade>()
+type LocalSortingState = Array<{ id: string; desc?: boolean }>
 
 function formatPnL(val: number | null) {
   if (val === null) return '—'
@@ -50,26 +29,28 @@ function formatPnL(val: number | null) {
 
 export default function TradeHistory() {
   const [filterClass, setFilterClass] = useState<string>('')
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'exit_time', desc: true }])
+  const [sorting, setSorting] = useState<LocalSortingState>([{ id: 'exit_time', desc: true }])
 
   const params: Record<string, string> = {}
   if (filterClass) params.asset_class = filterClass
 
-  const { data: trades = [], isLoading, refetch, isRefetching } = useQuery<Trade[]>({
+  const qTrades = useQuery({
     queryKey: ['trades', filterClass],
     queryFn: () => fetchTradeHistory(params),
     refetchInterval: 30000,
-  })
+  }) as { data?: Trade[]; isLoading?: boolean; refetch?: () => Promise<any>; isRefetching?: boolean }
+  const trades = qTrades.data ?? []
 
-  const { data: summary } = useQuery<Summary>({
+  const qSummary = useQuery({
     queryKey: ['trade-summary', filterClass],
     queryFn: () => fetchTradeSummary(filterClass ? { asset_class: filterClass } : {}),
     refetchInterval: 30000,
-  })
+  }) as { data?: LocalSummary }
+  const summary = qSummary.data
 
   const exportCSV = () => {
     const rows = [
-      ['Symbol', 'Class', 'Entry Price', 'Exit Price', 'Qty', 'Entry Time', 'Exit Time', 'PnL Realized', 'Exit Reason', 'Entry Strategy'],
+      ['Symbol', 'Class', 'Entry Price', 'Exit Price', 'Qty', 'Entry Time', 'Exit Time', 'PnL Realized', 'Fees Paid', 'Exit Strategy', 'Entry Strategy', 'Regime At Entry'],
       ...trades.map(t => [
         t.symbol,
         t.asset_class,
@@ -79,8 +60,10 @@ export default function TradeHistory() {
         t.entry_time ? new Date(t.entry_time).toISOString() : '',
         t.exit_time ? new Date(t.exit_time).toISOString() : '',
         t.pnl_realized ?? '',
-        t.exit_reason ?? '',
+        t.fees_paid ?? '',
+        t.exit_strategy ?? '',
         t.entry_strategy ?? '',
+        t.regime_at_entry ?? '',
       ]),
     ]
     const csv = rows.map(r => r.join(',')).join('\n')
@@ -107,11 +90,11 @@ export default function TradeHistory() {
     }),
     columnHelper.accessor('entry_price', {
       header: 'ENTRY_Px',
-      cell: info => <span className="text-gray-400 font-mono">{info.getValue()?.toFixed(4) ?? '—'}</span>
+      cell: info => <span className="text-gray-400 font-mono">{info.getValue() == null ? '—' : info.getValue().toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</span>
     }),
     columnHelper.accessor('exit_price', {
       header: 'EXIT_Px',
-      cell: info => <span className="text-gray-300 font-mono">{info.getValue()?.toFixed(4) ?? '—'}</span>
+      cell: info => <span className="text-gray-300 font-mono">{info.getValue() == null ? '—' : info.getValue().toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</span>
     }),
     columnHelper.accessor('pnl_realized', {
       header: 'REALIZED_DELTA',
@@ -175,13 +158,13 @@ export default function TradeHistory() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={exportCSV} className="btn-ghost flex items-center gap-2 px-3 disabled:opacity-50" disabled={isLoading || trades.length === 0}>
+  <button onClick={exportCSV} className="btn-ghost flex items-center gap-2 px-3 disabled:opacity-50" disabled={(qTrades.isLoading ?? false) || trades.length === 0}>
             <Download size={14} />
             <span className="mono text-xs uppercase tracking-wider">Dump Telemetry</span>
           </button>
           <div className="w-[1px] h-6 bg-surface-border"></div>
-          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
-            <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
+          <button onClick={() => qTrades.refetch?.()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={(qTrades.isLoading ?? false) || (qTrades.isRefetching ?? false) ? 'animate-spin text-brand' : ''} />
             <span className="mono text-xs uppercase tracking-wider">Sync Log</span>
           </button>
         </div>
@@ -240,7 +223,7 @@ export default function TradeHistory() {
         </div>
         
         <div className="card p-0 flex-1 flex flex-col overflow-hidden border border-surface-border bg-surface-card/40 backdrop-blur-sm relative shadow-card-inset">
-          {isLoading ? (
+          {(qTrades.isLoading ?? false) ? (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-3">
                <Activity className="animate-pulse-slow text-brand" size={32} />
                <span className="mono text-xs uppercase tracking-widest">Compiling Trade Archives...</span>

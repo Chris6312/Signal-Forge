@@ -54,6 +54,7 @@ def _drop_incomplete_timesales(candles: list[dict], interval_minutes: int) -> li
     bar_time = _parse_et_timestamp(str(candles[-1].get("time", "")))
     if bar_time is None:
         return candles
+    # Derive actual close time from last candle; if it's in the future we drop it
     if bar_time.timestamp() + interval_minutes * 60 > datetime.now(timezone.utc).timestamp():
         return candles[:-1]
     return candles

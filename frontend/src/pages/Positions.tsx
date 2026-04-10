@@ -40,11 +40,20 @@ interface Position {
   regime_at_entry: string | null
   watchlist_source_id?: string | null
   management_policy_version?: string | null
-  milestone_state?: Record<string, any> | null
-  frozen_policy?: Record<string, any> | null
+  milestone_state?: {
+    tp1_hit?: boolean
+    trail_active?: boolean
+    trailing_stop?: number | null
+    [key: string]: unknown
+  } | null
+  frozen_policy?: {
+    trail_active?: boolean
+    exit_strategy?: string | null
+    [key: string]: unknown
+  } | null
 }
 
-const columnHelper = createColumnHelper<Position>()
+const columnHelper = createColumnHelper()
 
 function formatCurrency(val: number | null | undefined) {
   if (val == null) return '$0.00'
@@ -58,17 +67,17 @@ function formatPnL(val: number | null | undefined) {
 }
 
 export default function Positions() {
-  const [sorting, setSorting] = useState<SortingState>([{ id: 'pnl_unrealized', desc: true }])
+  const [sorting, setSorting] = useState<any>([{ id: 'pnl_unrealized', desc: true }])
   const [globalFilter, setGlobalFilter] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
 
-  const { data, isRefetching, refetch } = useQuery<Position[]>({
+  const q = useQuery({
     queryKey: ['positions', 'open'],
     queryFn: () => fetchOpenPositions(),
-    staleTime: 10000, 
-  })
+    staleTime: 10000,
+  }) as { data?: Position[]; isRefetching?: boolean; refetch?: () => Promise<any> }
 
-  const positions = useMemo(() => Array.isArray(data) ? data : [], [data])
+  const positions = useMemo(() => Array.isArray(q.data) ? q.data : [], [q.data])
 
   const columns = useMemo(() => [
     columnHelper.accessor('symbol', {
@@ -110,7 +119,7 @@ export default function Positions() {
     columnHelper.accessor('pnl_unrealized', {
       header: 'LIVE_DELTA',
       cell: info => {
-        const val = info.getValue() ?? 0
+        const val = (info.getValue() as number) ?? 0
         return (
           <span className={clsx(
             "font-bold font-mono transition-colors duration-300",
@@ -183,8 +192,8 @@ export default function Positions() {
               className="bg-[#12141f] border border-surface-border rounded-lg py-1.5 pl-9 pr-4 text-white font-mono text-sm focus:outline-none focus:border-brand/50 focus:ring-1 focus:ring-brand/50 w-64 transition-all"
             />
           </div>
-          <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
-            <RefreshCw size={14} className={isRefetching ? "animate-spin text-brand" : ""} />
+          <button onClick={() => q.refetch?.()} className="btn-ghost flex items-center gap-2 px-3">
+            <RefreshCw size={14} className={(q.isRefetching ?? false) ? "animate-spin text-brand" : ""} />
           </button>
         </div>
       </div>
@@ -215,6 +224,7 @@ export default function Positions() {
                 // - a `trailing_stop` value exists on the milestone (implies an active dynamic trail),
                 // - or the configured exit strategy indicates dynamic/trailing behaviour (heuristic).
                 const exitStrategy = String(row.original.exit_strategy || '')
+                const showsProfitTargets = /partial at tp1/i.test(exitStrategy)
                 const strategyIndicatesDynamicTrail = /dynamic|trail/i.test(exitStrategy)
                 const trailActive = Boolean(
                   (row.original.frozen_policy?.trail_active) ||
@@ -264,10 +274,23 @@ export default function Positions() {
                               </div>
                             </div>
 
-                            {/* Column 3: Profit Objectives */}
+                            {/* Column 3: Exit Objectives / Protection */}
                             <div className="space-y-4">
-                              <SubMetric label="TARGET_1 (TP1)" value={formatCurrency(row.original.profit_target_1)} color="text-system-online" icon={<Target size={10} />} />
-                              <SubMetric label="TARGET_2 (TP2)" value={formatCurrency(row.original.profit_target_2)} color="text-system-online" />
+                              {showsProfitTargets ? (
+                                <>
+                                  <SubMetric label="TARGET_1 (TP1)" value={formatCurrency(row.original.profit_target_1)} color="text-system-online" icon={<Target size={10} />} />
+                                  <SubMetric label="TARGET_2 (TP2)" value={formatCurrency(row.original.profit_target_2)} color="text-system-online" />
+                                </>
+                              ) : (
+                                <>
+                                  <SubMetric label="EXIT_POLICY" value={exitStrategy || '—'} icon={<Target size={10} />} />
+                                  <SubMetric
+                                    label="TRAILING_STOP"
+                                    value={trailActive && milestone?.trailing_stop ? formatCurrency(Number(milestone.trailing_stop)) : 'INACTIVE'}
+                                    color={trailActive ? "text-system-online" : "text-gray-500"}
+                                  />
+                                </>
+                              )}
                             </div>
 
                             {/* Column 4: Strategy & Performance */}
@@ -302,7 +325,7 @@ export default function Positions() {
   )
 }
 
-function SubMetric({ label, value, color = "text-gray-300", mono = false, icon }: { label: string, value: any, color?: string, mono?: boolean, icon?: React.ReactNode }) {
+function SubMetric({ label, value, color = "text-gray-300", mono = false, icon }: { label: string, value: React.ReactNode | number | string | null | undefined, color?: string, mono?: boolean, icon?: React.ReactNode }) {
   return (
     <div className="space-y-1">
       <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter flex items-center gap-1.5">

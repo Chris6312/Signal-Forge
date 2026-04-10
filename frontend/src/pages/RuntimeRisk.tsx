@@ -45,11 +45,16 @@ export default function RuntimeRisk() {
   const [confirmCode, setConfirmCode] = useState('')
   const [lastHalt, setLastHalt] = useState<any>(null)
 
-  const { data, isLoading, refetch, isRefetching } = useQuery<RuntimeState>({
+  const qRuntime = useQuery({
     queryKey: ['runtime'],
     queryFn: fetchRuntime,
     refetchInterval: 10000,
-  })
+  }) as { data?: RuntimeState; isLoading?: boolean; refetch?: () => Promise<unknown>; isRefetching?: boolean }
+
+  const data = qRuntime.data
+  const isLoading = qRuntime.isLoading
+  const refetch = qRuntime.refetch
+  const isRefetching = qRuntime.isRefetching
 
   const [requestingHalt, setRequestingHalt] = useState(false)
   const [confirmingHalt, setConfirmingHalt] = useState(false)
@@ -96,12 +101,14 @@ export default function RuntimeRisk() {
   }
 
 
-  const { data: marketData } = useQuery<MarketStatusResponse>({
+  const qMarket = useQuery({
     queryKey: ['market-status'],
     queryFn: fetchMarketStatus,
     refetchInterval: 60_000,
     staleTime: 30_000,
-  })
+  }) as { data?: MarketStatusResponse }
+
+  const marketData = qMarket.data
 
   const ms = marketData?.status ?? 'open'
 

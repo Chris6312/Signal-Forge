@@ -6,6 +6,7 @@ import pytest
 
 from app.stocks.strategies.exit_strategies import (
     _atr_from_history,
+    EndOfDayExit,
     FixedRiskBreakEvenPromotion,
     FirstFailedFollowThroughExit,
     PartialAtTP1TrailRemainder,
@@ -78,6 +79,15 @@ class TestFixedRiskBreakEvenPromotion:
             decision = self.strategy.evaluate(pos, 102.0, trending_up_history(20))
         assert decision.should_exit is False
         assert decision.reason == "Holding"
+
+    def test_tp1_activates_atr_trail(self):
+        with patch(_NOT_EOD, return_value=False):
+            decision = self.strategy.evaluate(_pos(current_stop=93.0), 108.0, trending_up_history(20))
+        assert decision.should_exit is False
+        assert decision.tp1_hit is True
+        assert decision.trailing_active is True
+        assert decision.new_stop is not None
+        assert decision.new_stop >= 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -172,3 +182,23 @@ class TestFirstFailedFollowThroughExit:
         with patch(_NOT_EOD, return_value=False):
             decision = self.strategy.evaluate(_pos(), 98.0, [make_bar(98.0)])
         assert decision.should_exit is False
+
+
+class TestEndOfDayExit:
+    def setup_method(self):
+        self.strategy = EndOfDayExit()
+
+    def test_tp1_activates_atr_trail_before_eod(self):
+        with patch(_NOT_EOD, return_value=False):
+            decision = self.strategy.evaluate(_pos(current_stop=93.0), 108.0, trending_up_history(20))
+        assert decision.should_exit is False
+        assert decision.tp1_hit is True
+        assert decision.trailing_active is True
+        assert decision.new_stop is not None
+
+    def test_trail_stop_hit_after_tp1(self):
+        pos = _pos(current_stop=100.0, milestone_state={"tp1_hit": True, "trailing_stop": 105.0})
+        with patch(_NOT_EOD, return_value=False):
+            decision = self.strategy.evaluate(pos, 104.0, trending_up_history(20))
+        assert decision.should_exit is True
+        assert "Trail stop hit" in decision.reason
