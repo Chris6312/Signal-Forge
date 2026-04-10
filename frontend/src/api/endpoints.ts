@@ -55,3 +55,7 @@ export const resetPaperData = (
       initial_stock_balance:  initialStockBalance,
     },
   }).then(r => r.data)
+
+export const requestHardHalt = (adminToken: string) => api.post('/runtime/halt/request', {}, { headers: { 'x-admin-token': adminToken } }).then(r => r.data)
+export const confirmHardHalt = (adminToken: string, confirm_code: string) => api.post('/runtime/halt', {}, { headers: { 'x-admin-token': adminToken }, params: { confirm_code } }).then(r => r.data)
+export const getLastHalt = () => api.get('/runtime/halt/last').then(r => r.data)

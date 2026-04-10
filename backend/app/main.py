@@ -89,9 +89,44 @@ async def ws_broadcast_worker():
             await asyncio.sleep(10)
             tick += 1
             if ws_manager._clients:
-                await ws_manager.broadcast("dashboard_update", await build_dashboard_payload())
-                if tick % 6 == 0:  # market status every ~60 s
-                    await ws_manager.broadcast("market_status_update", build_market_status_payload())
+                # Core dashboard
+                try:
+                    await ws_manager.broadcast("dashboard_update", await build_dashboard_payload())
+                except Exception as exc:
+                    logger.debug("dashboard broadcast failed: %s", exc)
+
+                # Market status every ~60s
+                if tick % 6 == 0:
+                    try:
+                        await ws_manager.broadcast("market_status_update", build_market_status_payload())
+                    except Exception as exc:
+                        logger.debug("market status broadcast failed: %s", exc)
+
+                # Runtime snapshot less frequently (~30s)
+                if tick % 3 == 0:
+                    try:
+                        state = await runtime_state.get_state()
+                        await ws_manager.broadcast("runtime_update", state)
+                    except Exception as exc:
+                        logger.debug("runtime broadcast failed: %s", exc)
+
+                # Ledger invalidation: notify clients to refresh ledger lists
+                if tick % 12 == 0:  # ~2 minutes
+                    try:
+                        await ws_manager.broadcast("ledger_accounts_update", None)
+                        await ws_manager.broadcast("ledger_entries_update", None)
+                    except Exception as exc:
+                        logger.debug("ledger broadcast failed: %s", exc)
+
+                # Lightweight notifications for other operator surfaces
+                if tick % 18 == 0:  # ~3 minutes
+                    try:
+                        await ws_manager.broadcast("trades_update", {"action": "invalidate"})
+                        await ws_manager.broadcast("audit_update", {"action": "invalidate"})
+                        await ws_manager.broadcast("monitoring_update", {"action": "invalidate"})
+                        await ws_manager.broadcast("watchlist_update", {"action": "invalidate"})
+                    except Exception as exc:
+                        logger.debug("aux broadcast failed: %s", exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:

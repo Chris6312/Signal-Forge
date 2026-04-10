@@ -12,16 +12,20 @@ from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
 from app.common.redis_client import get_redis
 from app.common.watchlist_engine import watchlist_engine
+from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
 from app.crypto.kraken_client import kraken_client
 from app.crypto.strategies.exit_strategies import evaluate_exit
 from app.crypto.ledger import crypto_ledger
 from app.common.paper_ledger import KRAKEN_TAKER_FEE_RATE
+from app.common.models.ledger import LedgerEntry
+from app.common.symbols import canonical_symbol
 
 logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "crypto"
 REENTRY_COOLDOWN_SECONDS = 4 * 3600  # 4-hour cooldown after a stop-out
 COOLDOWN_KEY_PREFIX = "cooldown:crypto:"
+EXIT_LOCK_KEY_PREFIX = "exit_lock:crypto:"
 
 
 class CryptoExitWorker:
@@ -59,7 +63,8 @@ class CryptoExitWorker:
 
     async def _evaluate_position(self, db, position: Position):
         try:
-            ticker = await kraken_client.get_ticker(position.symbol)
+            can = canonical_symbol(position.symbol, asset_class=ASSET_CLASS)
+            ticker = await kraken_client.get_ticker(can)
             current_price = float(ticker.get("c", [position.entry_price])[0])
         except Exception as exc:
             logger.warning("Failed to fetch price for %s: %s", position.symbol, exc)
@@ -81,18 +86,22 @@ class CryptoExitWorker:
                 (current_price - position.entry_price) * position.quantity
             )
 
-        if position.max_hold_hours and position.entry_time:
+        try:
+            hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
+        except Exception:
+            hard_flag = False
+        if hard_flag and position.max_hold_hours and position.entry_time:
             elapsed_hours = (now - position.entry_time).total_seconds() / 3600
             if elapsed_hours >= position.max_hold_hours:
                 await self._close_position(
                     db, position, current_price,
-                    f"Max hold time exceeded ({position.max_hold_hours}h)", now,
+                    f"Hard max hold time exceeded ({position.max_hold_hours}h)", now,
                 )
                 position.updated_at = now
                 return
 
         try:
-            ohlcv = await kraken_client.get_ohlcv(position.symbol, interval=60)
+            ohlcv = await kraken_client.get_ohlcv(canonical_symbol(position.symbol, asset_class=ASSET_CLASS), interval=60)
         except Exception:
             ohlcv = []
 
@@ -114,6 +123,8 @@ class CryptoExitWorker:
         if decision.trailing_active:
             milestone = {**(position.milestone_state or {})}
             milestone["trailing_stop"] = decision.new_stop
+            # Mark that a dynamic trailing mechanism is active for this runner
+            milestone["trail_active"] = True
             position.milestone_state = milestone
 
         if decision.partial and not (position.milestone_state or {}).get("tp1_hit"):
@@ -128,27 +139,79 @@ class CryptoExitWorker:
                     (current_price - position.entry_price) * (position.quantity or 0.0)
                 )
                 if partial_proceeds > 0:
-                    await crypto_ledger.record_exit(
-                        db,
-                        symbol=position.symbol,
-                        net_proceeds=partial_proceeds,
-                        pnl=partial_pnl,
-                        position_id=position.id,
-                        notes=f"Partial exit {int(decision.partial_pct * 100)}% at TP1 {current_price:.4f}",
-                    )
-                exit_fee = round(current_price * partial_qty * KRAKEN_TAKER_FEE_RATE, 8)
-                if exit_fee > 0:
-                    await crypto_ledger.record_fee(
-                        db,
-                        symbol=position.symbol,
-                        fee=exit_fee,
-                        position_id=position.id,
-                    )
+                    redis = None
+                    lock_key = f"{EXIT_LOCK_KEY_PREFIX}{position.id}"
+                    locked = False
+                    try:
+                        redis = await get_redis()
+                        locked = await redis.set(lock_key, "1", nx=True, ex=60)
+                    except Exception as exc:
+                        logger.warning("Failed to acquire exit lock for %s: %s", position.symbol, exc)
+                    if not locked:
+                        logger.debug("Partial exit skipped for %s because another exit is in progress", position.symbol)
+                    else:
+                        try:
+                            order = Order(
+                                position_id=position.id,
+                                symbol=position.symbol,
+                                asset_class=ASSET_CLASS,
+                                order_type=OrderType.PARTIAL_EXIT,
+                                side=OrderSide.SELL,
+                                quantity=partial_qty,
+                                requested_price=current_price,
+                                status=OrderStatus.FILLED,
+                                broker_order_id="PAPER_EXEC",
+                                placed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                                filled_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                                fill_price=current_price,
+                                notes=f"Auto partial TP1 executed by worker",
+                            )
+                            db.add(order)
+                            await db.flush()
+                            await crypto_ledger.record_exit(
+                                db,
+                                symbol=position.symbol,
+                                net_proceeds=partial_proceeds,
+                                pnl=partial_pnl,
+                                position_id=position.id,
+                                notes=f"Partial exit {int(decision.partial_pct * 100)}% at TP1 {current_price:.4f}",
+                            )
+                            exit_fee = round(current_price * partial_qty * KRAKEN_TAKER_FEE_RATE, 8)
+                            if exit_fee > 0:
+                                fee_entry = await crypto_ledger.record_fee(
+                                    db,
+                                    symbol=position.symbol,
+                                    fee=exit_fee,
+                                    position_id=position.id,
+                                )
+                                try:
+                                    fee_entry.order_id = order.id
+                                    db.add(fee_entry)
+                                    await db.flush()
+                                except Exception:
+                                    pass
+                            stmt = select(LedgerEntry).where(LedgerEntry.position_id == position.id).order_by(LedgerEntry.created_at.desc())
+                            res = await db.execute(stmt)
+                            last_entry = res.scalar_one_or_none()
+                            if last_entry:
+                                last_entry.order_id = order.id
+                                db.add(last_entry)
+                                await db.flush()
+                        except Exception as exc:
+                            logger.warning("Failed to record partial exit order/ledger for %s: %s", position.symbol, exc)
+                        finally:
+                            try:
+                                if redis and locked:
+                                    await redis.delete(lock_key)
+                            except Exception:
+                                pass
 
             milestone = {**(position.milestone_state or {})}
             milestone["tp1_hit"] = True
             milestone["tp1_price"] = current_price
             milestone["trailing_stop"] = position.current_stop
+            # When TP1 is executed we consider the dynamic trail to be active
+            milestone["trail_active"] = True
             position.milestone_state = milestone
 
             await log_event(
@@ -169,7 +232,45 @@ class CryptoExitWorker:
             )
 
         if decision.should_exit:
-            await self._close_position(db, position, current_price, decision.reason, now)
+            redis = None
+            lock_key = f"{EXIT_LOCK_KEY_PREFIX}{position.id}"
+            locked = False
+            try:
+                redis = await get_redis()
+                locked = await redis.set(lock_key, "1", nx=True, ex=120)
+            except Exception as exc:
+                logger.warning("Failed to acquire exit lock for full exit %s: %s", position.symbol, exc)
+            if not locked:
+                logger.debug("Full exit skipped for %s because another exit is in progress", position.symbol)
+            else:
+                try:
+                    try:
+                        order = Order(
+                            position_id=position.id,
+                            symbol=position.symbol,
+                            asset_class=ASSET_CLASS,
+                            order_type=OrderType.EXIT,
+                            side=OrderSide.SELL,
+                            quantity=position.quantity or 0.0,
+                            requested_price=current_price,
+                            status=OrderStatus.FILLED,
+                            broker_order_id="PAPER_EXEC",
+                            placed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            filled_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            fill_price=current_price,
+                            notes=f"Auto full exit executed by worker: {decision.reason}",
+                        )
+                        db.add(order)
+                        await db.flush()
+                    except Exception as exc:
+                        logger.warning("Failed to create exit order row for %s: %s", position.symbol, exc)
+                    await self._close_position(db, position, current_price, decision.reason, now)
+                finally:
+                    try:
+                        if redis and locked:
+                            await redis.delete(lock_key)
+                    except Exception:
+                        pass
 
         position.updated_at = now
 

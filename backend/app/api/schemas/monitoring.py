@@ -11,6 +11,15 @@ class MonitoringCandidateOut(BaseModel):
     top_confidence: float | None = None
     top_entry: float | None = None
 
+    # Diagnostic fields added in Phase 2A
+    blocked_reason: str | None = None
+    has_open_position: bool = False
+    cooldown_active: bool = False
+    regime_allowed: bool | None = None
+    evaluation_error: str | None = None
+    top_notes: str | None = None
+    position_or_order_status: str | None = None
+
 
 class MonitoringListOut(BaseModel):
     candidates: list[MonitoringCandidateOut]

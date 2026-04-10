@@ -2,13 +2,23 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin, get_db_session
 from app.api.schemas.runtime import RuntimeStateOut, RuntimeUpdateIn
 from app.common.runtime_state import runtime_state
 from app.common.market_hours import market_status, is_trading_day
+from app.common.audit_logger import log_event
+from app.common.models.order import Order, OrderStatus
+from app.common.models.position import Position, PositionState
+from app.common.models.audit import AuditSource
+from app.common.database import AsyncSessionLocal
+from datetime import datetime, timezone
+from fastapi import Header
+import uuid
+
+DELAY_SECONDS = 5
 
 router = APIRouter()
 
@@ -46,14 +56,166 @@ async def update_runtime(body: RuntimeUpdateIn):
 
 
 @router.post("/halt", dependencies=[Depends(require_admin)])
-async def halt_trading():
-    await runtime_state.set_value("trading_enabled", False)
-    return {"message": "Trading halted"}
+async def halt_trading(confirm_code: str | None = Query(None), x_admin_user: str | None = Header(None)):
+    operator = x_admin_user or 'admin'
+
+    # If no confirm_code provided, perform a soft halt
+    if not confirm_code:
+        await runtime_state.set_value("trading_enabled", False)
+        await runtime_state.set_value("halt_mode", "soft")
+        ts = datetime.now(timezone.utc).isoformat()
+        await runtime_state.set_value("last_halt", {"at": ts, "by": operator, "mode": "soft"})
+        # Audit
+        async with AsyncSessionLocal() as db:
+            await log_event(db, 'SYSTEM_SOFT_HALT', f'Soft halt initiated by {operator}', source=AuditSource.SYSTEM, event_data={'operator': operator})
+            await db.commit()
+        return {"message": "Soft halt executed"}
+
+    # Hard halt path: validate confirm code against last_halt_request
+    req = await runtime_state.get_value('last_halt_request', {})
+    if not req or req.get('token') != confirm_code:
+        raise HTTPException(status_code=400, detail='Invalid or missing confirm code')
+
+    try:
+        requested_at = datetime.fromisoformat(req.get('requested_at'))
+    except Exception:
+        raise HTTPException(status_code=400, detail='Malformed halt request')
+
+    now = datetime.now(timezone.utc)
+    if (now - requested_at).total_seconds() < DELAY_SECONDS:
+        raise HTTPException(status_code=400, detail=f'Please wait at least {DELAY_SECONDS} seconds after requesting hard halt before confirming')
+
+    # All validations passed: proceed with hard halt
+    await runtime_state.set_value('trading_enabled', False)
+    await runtime_state.set_value('halt_mode', 'hard')
+
+    async with AsyncSessionLocal() as db:
+        try:
+            now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+
+            # Cancel pending/submitted/partially_filled orders and attempt broker-level cancellations
+            pending_statuses = [OrderStatus.PENDING, OrderStatus.SUBMITTED, OrderStatus.PARTIALLY_FILLED]
+            stmt_orders = select(Order).where(Order.status.in_(pending_statuses))
+            res_orders = await db.execute(stmt_orders)
+            orders = res_orders.scalars().all()
+            orders_cancelled = 0
+            from app.crypto.kraken_client import kraken_client
+            from app.stocks.tradier_client import tradier_client
+
+            for ord in orders:
+                cancelled = False
+                # Attempt broker-level cancel if broker_order_id present
+                try:
+                    if ord.asset_class == 'crypto' and ord.broker_order_id:
+                        try:
+                            await kraken_client.cancel_order(ord.broker_order_id)
+                        except Exception as e:
+                            # log and continue
+                            await log_event(db, 'ORDER_BROKER_CANCEL_FAILED', f'Failed broker cancel for {ord.id}: {e}', asset_class=ord.asset_class, symbol=ord.symbol, position_id=str(ord.position_id) if ord.position_id else None, source=AuditSource.WORKER, event_data={'error': str(e)})
+                    if ord.asset_class == 'stock' and ord.broker_order_id:
+                        try:
+                            await tradier_client.cancel_order(ord.broker_order_id)
+                        except Exception as e:
+                            await log_event(db, 'ORDER_BROKER_CANCEL_FAILED', f'Failed broker cancel for {ord.id}: {e}', asset_class=ord.asset_class, symbol=ord.symbol, position_id=str(ord.position_id) if ord.position_id else None, source=AuditSource.WORKER, event_data={'error': str(e)})
+                except Exception:
+                    pass
+
+                # Mark DB order cancelled
+                try:
+                    ord.status = OrderStatus.CANCELLED
+                    ord.notes = (ord.notes or '') + ' | Cancelled by HARD_KILL'
+                    db.add(ord)
+                    orders_cancelled += 1
+                    await log_event(db, 'ORDER_CANCELLED', f'Order {ord.id} cancelled by hard kill', asset_class=ord.asset_class, symbol=ord.symbol, position_id=str(ord.position_id) if ord.position_id else None, source=AuditSource.WORKER)
+                except Exception as exc:
+                    await log_event(db, 'ORDER_CANCEL_FAILED', f'Failed to mark order {ord.id} cancelled: {exc}', asset_class=ord.asset_class, symbol=ord.symbol, source=AuditSource.WORKER, event_data={'error': str(exc)})
+
+            # Close open positions and attempt broker-level market exits
+            result = await db.execute(select(Position).where(Position.state == PositionState.OPEN))
+            open_positions = result.scalars().all()
+            closed_count = 0
+            for pos in open_positions:
+                try:
+                    # Attempt broker-level exit
+                    try:
+                        if pos.asset_class == 'crypto':
+                            # Sell via Kraken market order
+                            try:
+                                await kraken_client.add_order(pos.symbol, 'sell', 'market', float(pos.quantity))
+                            except Exception as e:
+                                await log_event(db, 'BROKER_EXIT_FAILED', f'Crypto broker exit failed for {pos.symbol}: {e}', asset_class=pos.asset_class, symbol=pos.symbol, position_id=str(pos.id), source=AuditSource.WORKER, event_data={'error': str(e)})
+                        elif pos.asset_class == 'stock':
+                            try:
+                                await tradier_client.place_order(pos.symbol, 'sell', int(pos.quantity), 'market')
+                            except Exception as e:
+                                await log_event(db, 'BROKER_EXIT_FAILED', f'Stock broker exit failed for {pos.symbol}: {e}', asset_class=pos.asset_class, symbol=pos.symbol, position_id=str(pos.id), source=AuditSource.WORKER, event_data={'error': str(e)})
+                    except Exception:
+                        pass
+
+                    pos.state = PositionState.CLOSED
+                    pos.exit_time = now_naive
+                    pos.exit_price = pos.current_price or pos.entry_price or 0.0
+                    pos.exit_reason = 'HARD_KILL'
+                    pos.pnl_realized = pos.pnl_unrealized or 0.0
+                    pos.updated_at = now_naive
+                    db.add(pos)
+                    closed_count += 1
+
+                    # Audit per-position
+                    await log_event(
+                        db,
+                        'POSITION_FORCE_CLOSED',
+                        f'Position {pos.symbol} force-closed by hard kill',
+                        asset_class=pos.asset_class,
+                        symbol=pos.symbol,
+                        position_id=str(pos.id),
+                        source=AuditSource.WORKER,
+                        event_data={'exit_price': pos.exit_price, 'reason': 'HARD_KILL'},
+                    )
+                except Exception as exc:
+                    await log_event(db, 'POSITION_FORCE_CLOSE_FAILED', f'Failed closing {pos.symbol}: {exc}', asset_class=pos.asset_class, symbol=pos.symbol, source=AuditSource.WORKER, event_data={'error': str(exc)})
+
+            # Record summary audit
+            await log_event(db, 'SYSTEM_HARD_HALT', f'Hard halt initiated by {operator}. Orders cancelled: {orders_cancelled}, positions closed: {closed_count}', source=AuditSource.SYSTEM, event_data={'orders_cancelled': orders_cancelled, 'positions_closed': closed_count, 'operator': operator})
+
+            # Set last_halt runtime state
+            await runtime_state.set_value('last_halt', {'at': now.isoformat(), 'by': operator, 'mode': 'hard'})
+
+            await db.commit()
+            return {'message': 'Hard halt executed', 'orders_cancelled': orders_cancelled, 'positions_closed': closed_count}
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            raise HTTPException(status_code=500, detail=f'Hard halt failed: {exc}')
+
+
+@router.post('/halt/request', dependencies=[Depends(require_admin)])
+async def request_hard_halt(x_admin_user: str | None = Header(None)):
+    """First step of two-step hard halt: generate a short-lived token and record request time."""
+    token = str(uuid.uuid4())[:8]
+    operator = x_admin_user or 'admin'
+    now = datetime.now(timezone.utc).isoformat()
+    await runtime_state.set_value('last_halt_request', {'token': token, 'requested_at': now, 'by': operator})
+    return {'token': token, 'requested_at': now}
+
+
+@router.get('/halt/last')
+async def get_last_halt():
+    val = await runtime_state.get_value('last_halt', {})
+    return val
 
 
 @router.post("/resume", dependencies=[Depends(require_admin)])
 async def resume_trading():
+    """Resume normal trading. Clears halt_mode and reenables trading_enabled."""
     await runtime_state.set_value("trading_enabled", True)
+    await runtime_state.set_value("halt_mode", "none")
+    # Log audit entry
+    async with get_db_session() as db:
+        await log_event(db, 'SYSTEM_RESUME', 'Trading resumed by operator', source=AuditSource.SYSTEM)
+        await db.commit()
     return {"message": "Trading resumed"}
 
 

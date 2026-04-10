@@ -13,15 +13,18 @@ from app.common.runtime_state import runtime_state
 from app.common.market_hours import can_pull_data
 from app.common.redis_client import get_redis
 from app.common.watchlist_engine import watchlist_engine
+from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
 from app.stocks.tradier_client import tradier_client
 from app.stocks.strategies.exit_strategies import evaluate_exit
 from app.stocks.ledger import stock_ledger
+from app.common.models.ledger import LedgerEntry
 
 logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "stock"
 REENTRY_COOLDOWN_SECONDS = 30 * 60   # 30-minute cooldown after a stop-out
 COOLDOWN_KEY_PREFIX = "cooldown:stock:"
+EXIT_LOCK_KEY_PREFIX = "exit_lock:stock:"
 
 
 class StockExitWorker:
@@ -86,12 +89,17 @@ class StockExitWorker:
                 (current_price - position.entry_price) * position.quantity
             )
 
-        if position.max_hold_hours and position.entry_time:
+        # Enforce hard max-hold only when the strategy explicitly froze this policy
+        try:
+            hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
+        except Exception:
+            hard_flag = False
+        if hard_flag and position.max_hold_hours and position.entry_time:
             elapsed_hours = (now - position.entry_time).total_seconds() / 3600
             if elapsed_hours >= position.max_hold_hours:
                 await self._close_position(
                     db, position, current_price,
-                    f"Max hold time exceeded ({position.max_hold_hours}h)", now,
+                    f"Hard max hold time exceeded ({position.max_hold_hours}h)", now,
                 )
                 position.updated_at = now
                 return
@@ -123,6 +131,8 @@ class StockExitWorker:
         if decision.trailing_active:
             milestone = {**(position.milestone_state or {})}
             milestone["trailing_stop"] = decision.new_stop
+            # Mark that a dynamic trailing mechanism is active for this runner
+            milestone["trail_active"] = True
             position.milestone_state = milestone
 
         if decision.partial and not (position.milestone_state or {}).get("tp1_hit"):
@@ -137,19 +147,66 @@ class StockExitWorker:
                     (current_price - position.entry_price) * (position.quantity or 0.0)
                 )
                 if partial_proceeds > 0:
-                    await stock_ledger.record_exit(
-                        db,
-                        symbol=position.symbol,
-                        net_proceeds=partial_proceeds,
-                        pnl=partial_pnl,
-                        position_id=position.id,
-                        notes=f"Partial exit {int(decision.partial_pct * 100)}% at TP1 {current_price:.2f}",
-                    )
+                    redis = None
+                    lock_key = f"{EXIT_LOCK_KEY_PREFIX}{position.id}"
+                    locked = False
+                    try:
+                        redis = await get_redis()
+                        # Try acquire lock with short TTL to avoid duplicate exits
+                        locked = await redis.set(lock_key, "1", nx=True, ex=60)
+                    except Exception as exc:
+                        logger.warning("Failed to acquire exit lock for %s: %s", position.symbol, exc)
+                    if not locked:
+                        logger.debug("Partial exit skipped for %s because another exit is in progress", position.symbol)
+                    else:
+                        try:
+                            order = Order(
+                                position_id=position.id,
+                                symbol=position.symbol,
+                                asset_class=ASSET_CLASS,
+                                order_type=OrderType.PARTIAL_EXIT,
+                                side=OrderSide.SELL,
+                                quantity=partial_qty,
+                                requested_price=current_price,
+                                status=OrderStatus.FILLED,
+                                broker_order_id="PAPER_EXEC",
+                                placed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                                filled_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                                fill_price=current_price,
+                                notes=f"Auto partial TP1 executed by worker",
+                            )
+                            db.add(order)
+                            await db.flush()
+                            await stock_ledger.record_exit(
+                                db,
+                                symbol=position.symbol,
+                                net_proceeds=partial_proceeds,
+                                pnl=partial_pnl,
+                                position_id=position.id,
+                                notes=f"Partial exit {int(decision.partial_pct * 100)}% at TP1 {current_price:.2f}",
+                            )
+                            stmt = select(LedgerEntry).where(LedgerEntry.position_id == position.id).order_by(LedgerEntry.created_at.desc())
+                            res = await db.execute(stmt)
+                            last_entry = res.scalar_one_or_none()
+                            if last_entry:
+                                last_entry.order_id = order.id
+                                db.add(last_entry)
+                                await db.flush()
+                        except Exception as exc:
+                            logger.warning("Failed to record partial exit order/ledger for %s: %s", position.symbol, exc)
+                        finally:
+                            try:
+                                if redis and locked:
+                                    await redis.delete(lock_key)
+                            except Exception:
+                                pass
 
             milestone = {**(position.milestone_state or {})}
             milestone["tp1_hit"] = True
             milestone["tp1_price"] = current_price
             milestone["trailing_stop"] = position.current_stop
+            # When TP1 is executed we consider the dynamic trail to be active
+            milestone["trail_active"] = True
             position.milestone_state = milestone
 
             await log_event(
@@ -170,7 +227,45 @@ class StockExitWorker:
             )
 
         if decision.should_exit:
-            await self._close_position(db, position, current_price, decision.reason, now)
+            redis = None
+            lock_key = f"{EXIT_LOCK_KEY_PREFIX}{position.id}"
+            locked = False
+            try:
+                redis = await get_redis()
+                locked = await redis.set(lock_key, "1", nx=True, ex=120)
+            except Exception as exc:
+                logger.warning("Failed to acquire exit lock for full exit %s: %s", position.symbol, exc)
+            if not locked:
+                logger.debug("Full exit skipped for %s because another exit is in progress", position.symbol)
+            else:
+                try:
+                    try:
+                        order = Order(
+                            position_id=position.id,
+                            symbol=position.symbol,
+                            asset_class=ASSET_CLASS,
+                            order_type=OrderType.EXIT,
+                            side=OrderSide.SELL,
+                            quantity=position.quantity or 0.0,
+                            requested_price=current_price,
+                            status=OrderStatus.FILLED,
+                            broker_order_id="PAPER_EXEC",
+                            placed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            filled_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                            fill_price=current_price,
+                            notes=f"Auto full exit executed by worker: {decision.reason}",
+                        )
+                        db.add(order)
+                        await db.flush()
+                    except Exception as exc:
+                        logger.warning("Failed to create exit order row for %s: %s", position.symbol, exc)
+                    await self._close_position(db, position, current_price, decision.reason, now)
+                finally:
+                    try:
+                        if redis and locked:
+                            await redis.delete(lock_key)
+                    except Exception:
+                        pass
 
         position.updated_at = now
 

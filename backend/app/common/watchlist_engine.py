@@ -10,6 +10,7 @@ from app.common.models.watchlist import WatchlistSymbol, SymbolState
 from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.database import AsyncSessionLocal
+from app.common.symbols import canonical_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +32,27 @@ class WatchlistEngine:
         new_symbols: List[dict],
         source_id: str,
     ) -> dict:
-        incoming = {
-            (item["symbol"].upper(), item["asset_class"].lower())
-            for item in new_symbols
-        }
-
-        # Only touch symbols whose asset_class appears in this update.
-        # A stock-only upload must never deactivate crypto symbols and vice versa.
-        incoming_asset_classes = {ac for _, ac in incoming}
+        # Normalize incoming items into tuples: (symbol, asset_class, metadata)
+        incoming_items = []
+        incoming_asset_classes: set[str] = set()
+        for item in new_symbols:
+            try:
+                ac = (item.get("asset_class") or "").lower()
+                if ac not in ("crypto", "stock"):
+                    # Skip invalid asset classes
+                    continue
+                sym = canonical_symbol(item.get("symbol", ""), asset_class=ac)
+                meta = {
+                    "reason": item.get("reason"),
+                    "confidence": float(item.get("confidence")) if item.get("confidence") is not None else None,
+                    "tags": item.get("tags") if isinstance(item.get("tags"), (list, tuple)) else None,
+                    "notes": item.get("notes"),
+                }
+                incoming_items.append((sym, ac, meta))
+                incoming_asset_classes.add(ac)
+            except Exception:
+                # Skip malformed entries but continue processing
+                continue
 
         stmt = select(WatchlistSymbol).where(
             WatchlistSymbol.state.in_([SymbolState.ACTIVE, SymbolState.MANAGED]),
@@ -61,14 +75,32 @@ class WatchlistEngine:
         added, removed, retained, promoted = [], [], [], []
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-        for symbol, asset_class in incoming:
+        for symbol, asset_class, meta in incoming_items:
             key = (symbol, asset_class)
             if key in existing_active:
+                # Update metadata on retained active symbols if provided
+                ws = existing_active[key]
+                if meta.get("reason"):
+                    ws.reason = meta["reason"]
+                if meta.get("confidence") is not None:
+                    ws.confidence = meta["confidence"]
+                if meta.get("tags") is not None:
+                    ws.tags = meta["tags"]
+                if meta.get("notes"):
+                    ws.notes = meta["notes"]
                 retained.append(symbol)
             elif key in existing_managed:
                 ws = existing_managed[key]
                 ws.state = SymbolState.ACTIVE
                 ws.watchlist_source_id = source_id
+                if meta.get("reason"):
+                    ws.reason = meta["reason"]
+                if meta.get("confidence") is not None:
+                    ws.confidence = meta["confidence"]
+                if meta.get("tags") is not None:
+                    ws.tags = meta["tags"]
+                if meta.get("notes"):
+                    ws.notes = meta["notes"]
                 promoted.append(symbol)
             else:
                 ws = WatchlistSymbol(
@@ -77,12 +109,16 @@ class WatchlistEngine:
                     asset_class=asset_class,
                     state=SymbolState.ACTIVE,
                     watchlist_source_id=source_id,
+                    notes=meta.get("notes"),
+                    reason=meta.get("reason"),
+                    confidence=meta.get("confidence"),
+                    tags=meta.get("tags"),
                     added_at=now,
                 )
                 db.add(ws)
                 added.append(symbol)
 
-        to_remove = {key: ws for key, ws in existing_active.items() if key not in incoming}
+        to_remove = {key: ws for key, ws in existing_active.items() if key not in {(s, ac) for s, ac, _ in incoming_items}}
 
         if to_remove:
             from app.common.models.position import Position, PositionState
@@ -134,7 +170,7 @@ class WatchlistEngine:
                 "removed": removed,
                 "retained": retained,
                 "promoted": promoted,
-                "total": len(incoming),
+                "total": len(incoming_items),
             },
         )
 
@@ -148,7 +184,7 @@ class WatchlistEngine:
             "removed": removed,
             "retained": retained,
             "promoted": promoted,
-            "total": len(incoming),
+            "total": len(incoming_items),
         }
 
     async def release_managed_symbol(

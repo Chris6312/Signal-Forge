@@ -8,6 +8,7 @@ import base64
 import httpx
 
 from app.common.config import settings
+from app.common.symbols import kraken_provider_pair
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class KrakenClient:
 
     def _sign(self, url_path: str, data: dict) -> str:
         post_data = urllib.parse.urlencode(data)
-        encoded = (str(data["nonce"]) + post_data).encode()
+        encoded = (str(data.get("nonce", "")) + post_data).encode()
         message = url_path.encode() + hashlib.sha256(encoded).digest()
         mac = hmac.new(base64.b64decode(self.api_secret), message, hashlib.sha512)
         return base64.b64encode(mac.digest()).decode()
@@ -54,13 +55,21 @@ class KrakenClient:
             return result.get("result", {})
 
     async def get_ticker(self, pair: str) -> dict:
-        data = await self._public("Ticker", {"pair": pair})
-        return data.get(pair) or next(iter(data.values()), {})
+        try:
+            provider_pair = kraken_provider_pair(pair)
+        except Exception:
+            provider_pair = pair
+        data = await self._public("Ticker", {"pair": provider_pair})
+        return data.get(provider_pair) or next(iter(data.values()), {})
 
     async def get_ohlcv(self, pair: str, interval: int = 60) -> list:
-        data = await self._public("OHLC", {"pair": pair, "interval": interval})
-        key = pair if pair in data else next(
-            (k for k in data if k != "last"), pair
+        try:
+            provider_pair = kraken_provider_pair(pair)
+        except Exception:
+            provider_pair = pair
+        data = await self._public("OHLC", {"pair": provider_pair, "interval": interval})
+        key = provider_pair if provider_pair in data else next(
+            (k for k in data if k != "last"), provider_pair
         )
         return data.get(key, [])
 
@@ -78,8 +87,12 @@ class KrakenClient:
         volume: float,
         price: float | None = None,
     ) -> dict:
+        try:
+            provider_pair = kraken_provider_pair(pair)
+        except Exception:
+            provider_pair = pair
         payload = {
-            "pair": pair,
+            "pair": provider_pair,
             "type": side.lower(),
             "ordertype": order_type.lower(),
             "volume": str(volume),

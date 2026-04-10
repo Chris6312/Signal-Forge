@@ -21,7 +21,7 @@ export function useWebSocket() {
 export default function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected')
   const [lastMessageTime, setLastMessageTime] = useState<number | null>(null)
-  
+
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
   const queryClient = useQueryClient()
@@ -30,7 +30,6 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
     let reconnectAttempts = 0
 
     const connect = () => {
-      // Derive WS URL from Vite API URL, fallback to localhost:8100
       const httpUrl = import.meta.env.VITE_API_URL || 'http://localhost:8100'
       const wsUrl = import.meta.env.VITE_WS_URL || `${httpUrl.replace('http', 'ws')}/ws`
 
@@ -41,11 +40,11 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
       ws.onopen = () => {
         setStatus('connected')
         reconnectAttempts = 0
-        
-        // Silent re-sync on connection
+
+        // Ensure critical queries are refreshed after reconnect
         queryClient.invalidateQueries({ queryKey: ['dashboard'] })
         queryClient.invalidateQueries({ queryKey: ['market-status'] })
-        
+
         toast.success('[SYS_MSG] Uplink Established', {
           description: 'Telemetry stream is active.',
         })
@@ -55,53 +54,83 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
         setLastMessageTime(Date.now())
         try {
           const payload = JSON.parse(event.data)
-          
-          // Route the incoming WSS payload directly into TanStack Query Cache and Toasts
+
+          // Primary topic routing
           switch (payload.topic) {
             case 'dashboard_update':
-              // Directly update dashboard query cache with new data
               queryClient.setQueryData(['dashboard'], payload.data)
               break
-              
+
             case 'market_status_update':
               queryClient.setQueryData(['market-status'], payload.data)
               break
-              
+
             case 'position_executed':
-              // Invalidate relevant lists to force a refetch
+              // Keep dashboard and positions fresh
               queryClient.invalidateQueries({ queryKey: ['dashboard'] })
               queryClient.invalidateQueries({ queryKey: ['positions'] })
-              queryClient.invalidateQueries({ queryKey: ['ledger'] })
-              
-              // Fire Terminal Notification
+              // Fix: invalidate both ledger accounts and entries (previously used incorrect key)
+              queryClient.invalidateQueries({ queryKey: ['ledger-accounts'] })
+              queryClient.invalidateQueries({ queryKey: ['ledger-entries'] })
+
               toast.success(`[EXEC_FILLED] ${payload.data?.symbol || 'UNKNOWN'}`, {
                 description: `${payload.data?.side || 'TRADE'} | QTY: ${payload.data?.quantity || '--'} | @ $${payload.data?.price || '--'}`,
                 duration: 5000,
               })
               break
 
-            case 'worker_alert':
-            case 'system_alert':
-              // Generic alert handling from the backend
-              const level = payload.data?.level || 'info'
-              const title = `[${payload.topic.toUpperCase()}]`
-              const desc = payload.data?.message || 'Unidentified system event.'
-              
-              if (level === 'error' || level === 'critical') {
-                toast.error(title, { description: desc, duration: 8000 })
-              } else if (level === 'warning') {
-                toast.warning(title, { description: desc, duration: 5000 })
+            case 'trades_update':
+              // Trades list changed: invalidate trade history and summaries
+              queryClient.invalidateQueries({ queryKey: ['trades'] })
+              queryClient.invalidateQueries({ queryKey: ['trade-summary'] })
+              break
+
+            case 'audit_update':
+              queryClient.invalidateQueries({ queryKey: ['audit'] })
+              break
+
+            case 'monitoring_update':
+              queryClient.invalidateQueries({ queryKey: ['monitoring'] })
+              break
+
+            case 'watchlist_update':
+              queryClient.invalidateQueries({ queryKey: ['watchlist'] })
+              break
+
+            case 'runtime_update':
+              // Replace runtime state cache directly
+              queryClient.setQueryData(['runtime'], payload.data)
+              break
+
+            case 'ledger_accounts_update':
+              if (payload.data != null) {
+                queryClient.setQueryData(['ledger-accounts'], payload.data)
               } else {
-                toast.info(title, { description: desc })
+                queryClient.invalidateQueries({ queryKey: ['ledger-accounts'] })
               }
               break
 
-            default:
-              // Generic invalidator for dynamic topics
-              if (payload.action === 'invalidate' && payload.queryKey) {
-                queryClient.invalidateQueries({ queryKey: payload.queryKey })
+            case 'ledger_entries_update':
+              if (payload.data != null) {
+                queryClient.setQueryData(['ledger-entries'], payload.data)
+              } else {
+                queryClient.invalidateQueries({ queryKey: ['ledger-entries'] })
               }
               break
+
+            // Generic topics and invalidation support
+            default: {
+              // Support both legacy root-level invalidation and nested data invalidation
+              const action = payload.action || payload.data?.action
+              const queryKey = payload.queryKey || payload.data?.queryKey
+              if (action === 'invalidate' && queryKey) {
+                try {
+                  queryClient.invalidateQueries({ queryKey })
+                } catch (err) {
+                  console.error('[WS] Invalidation failed', err)
+                }
+              }
+            }
           }
         } catch (error) {
           console.error('[Forge_OS] Failed to parse WSS payload:', error)
@@ -114,17 +143,15 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
             description: 'Attempting to re-establish connection...',
           })
         }
-        
+
         setStatus('disconnected')
-        
-        // Exponential backoff reconnect
+
         const timeout = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
         reconnectAttempts++
         reconnectTimeoutRef.current = setTimeout(connect, timeout)
       }
 
       ws.onerror = () => {
-        // ws.onclose will handle the reconnection
         ws.close()
       }
     }
@@ -134,11 +161,11 @@ export default function WebSocketProvider({ children }: { children: React.ReactN
     return () => {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current)
       if (wsRef.current) {
-        wsRef.current.onclose = null // Prevent reconnect loop on unmount
+        wsRef.current.onclose = null
         wsRef.current.close()
       }
     }
-  }, [queryClient]) // Note: removed `status` from deps to prevent infinite reconnect loops
+  }, [queryClient])
 
   return (
     <WebSocketContext.Provider value={{ status, lastMessageTime }}>

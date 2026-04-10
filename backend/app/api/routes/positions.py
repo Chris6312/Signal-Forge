@@ -8,6 +8,7 @@ from app.api.schemas.position import PositionOut
 from app.api.schemas.order import OrderOut
 from app.common.models.position import Position, PositionState
 from app.common.models.order import Order
+from sqlalchemy.orm import selectinload
 
 router = APIRouter()
 
@@ -38,7 +39,7 @@ async def get_open_positions(db: AsyncSession = Depends(get_db_session)):
 
 @router.get("/{position_id}", response_model=PositionOut)
 async def get_position(position_id: str, db: AsyncSession = Depends(get_db_session)):
-    stmt = select(Position).where(Position.id == UUID(position_id))
+    stmt = select(Position).where(Position.id == UUID(position_id)).options(selectinload(Position.orders))
     result = await db.execute(stmt)
     pos = result.scalar_one_or_none()
     if not pos:

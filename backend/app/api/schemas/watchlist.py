@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
+from typing import List, Optional
 
 
 class WatchlistSymbolOut(BaseModel):
@@ -10,6 +11,9 @@ class WatchlistSymbolOut(BaseModel):
     state: str
     watchlist_source_id: str | None = None
     notes: str | None = None
+    reason: str | None = None
+    confidence: float | None = None
+    tags: list[str] | None = None
     added_at: datetime | None = None
     removed_at: datetime | None = None
     managed_since: datetime | None = None
@@ -17,13 +21,36 @@ class WatchlistSymbolOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class WatchlistItemIn(BaseModel):
+    symbol: str = Field(..., min_length=1, max_length=50)
+    asset_class: str = Field(...)
+    reason: str | None = None
+    confidence: float | None = None
+    tags: list[str] | None = None
+    notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, data: object) -> object:
+        # Accept either dicts or simple strings; normalise to dict
+        if isinstance(data, str):
+            return {"symbol": data}
+        return data
+
+    @model_validator(mode="after")
+    def validate_asset_class(cls, model):
+        ac = getattr(model, "asset_class", None)
+        if ac is None:
+            raise ValueError("asset_class is required and must be 'crypto' or 'stock'")
+        if ac not in ("crypto", "stock"):
+            raise ValueError("asset_class must be 'crypto' or 'stock'")
+        return model
+
+
 class WatchlistUpdateIn(BaseModel):
-    watchlist: list[dict]
+    watchlist: List[WatchlistItemIn]
     source_id: str = "manual"
 
-    # Accept the AI screener schema format where the list is called "symbols"
-    # and the provenance field is called "source". Extra fields (timestamp,
-    # notes, confidence, etc.) are silently ignored by Pydantic v2 by default.
     @model_validator(mode="before")
     @classmethod
     def _normalise_ai_schema(cls, data: object) -> object:

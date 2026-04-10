@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchRuntime, fetchMarketStatus, patchRuntime, haltTrading, resumeTrading, resetPaperData } from '@/api/endpoints'
+import { fetchRuntime, fetchMarketStatus, patchRuntime, haltTrading, resumeTrading, resetPaperData, requestHardHalt, confirmHardHalt, getLastHalt } from '@/api/endpoints'
 import type { MarketStatusResponse } from '@/api/types'
 import StatusBadge from '@/components/StatusBadge'
 import { RefreshCw, ShieldAlert, ShieldCheck, Settings, FlaskConical, Zap, Clock, Trash2, Cpu, Activity, Server } from 'lucide-react'
@@ -41,12 +41,60 @@ export default function RuntimeRisk() {
   const [stockSeed, setStockSeed] = useState('')
   const [confirmReset, setConfirmReset] = useState(false)
   const [sysLog, setSysLog] = useState<{ message: string; type: 'error' | 'success' } | null>(null)
+  const [haltToken, setHaltToken] = useState<string | null>(null)
+  const [confirmCode, setConfirmCode] = useState('')
+  const [lastHalt, setLastHalt] = useState<any>(null)
 
   const { data, isLoading, refetch, isRefetching } = useQuery<RuntimeState>({
     queryKey: ['runtime'],
     queryFn: fetchRuntime,
     refetchInterval: 10000,
   })
+
+  const [requestingHalt, setRequestingHalt] = useState(false)
+  const [confirmingHalt, setConfirmingHalt] = useState(false)
+
+  const requestHaltHandler = async () => {
+    if (!adminToken) return showSysLog('AUTH REQUIRED', 'error')
+    setRequestingHalt(true)
+    try {
+      const res = await requestHardHalt(adminToken)
+      setHaltToken(res.token)
+      showSysLog('HARD HALT TOKEN ISSUED', 'success')
+    } catch {
+      showSysLog('REQUEST FAILED', 'error')
+    } finally {
+      setRequestingHalt(false)
+    }
+  }
+
+  const confirmHaltHandler = async () => {
+    if (!adminToken) return showSysLog('AUTH REQUIRED', 'error')
+    if (!confirmCode) return showSysLog('CONFIRM CODE REQUIRED', 'error')
+    setConfirmingHalt(true)
+    try {
+      await confirmHardHalt(adminToken, confirmCode)
+      showSysLog('HARD HALT EXECUTED', 'success')
+      qc.invalidateQueries({ queryKey: ['runtime'] })
+      setHaltToken(null)
+      setConfirmCode('')
+    } catch (err) {
+      console.error('confirmHaltHandler error', err)
+      showSysLog('CONFIRM FAILED', 'error')
+    } finally {
+      setConfirmingHalt(false)
+    }
+  }
+
+  const loadLastHalt = async () => {
+    try {
+      const v = await getLastHalt()
+      setLastHalt(v)
+    } catch {
+      setLastHalt(null)
+    }
+  }
+
 
   const { data: marketData } = useQuery<MarketStatusResponse>({
     queryKey: ['market-status'],
@@ -158,7 +206,7 @@ export default function RuntimeRisk() {
           </div>
           
           <div className="space-y-4 relative z-10">
-            <Row label="Master Engine" value={<StatusBadge status={data?.status ?? 'UNKNOWN'} />} />
+            <Row label="Master Engine" value={<StatusBadge status={data?.status ?? 'UNKNOWN'} showRaw />} />
             
             <Row label="Operation Mode" value={
               <span className={clsx(
@@ -173,8 +221,8 @@ export default function RuntimeRisk() {
             } />
             
             <Row label="Risk Threshold (Per Vector)" value={<span className="mono text-white bg-[#12141f] border border-surface-border px-2 py-0.5 rounded shadow-card-inset">{((data?.risk_per_trade_pct ?? 0.02) * 100).toFixed(1)}%</span>} />
-            <Row label="Global Trading" value={<StatusBadge status={data?.trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
-            <Row label="Node_A Execution (Crypto)" value={<StatusBadge status={data?.crypto_trading_enabled ? 'ACTIVE' : 'INACTIVE'} />} />
+            <Row label="Global Trading" value={<StatusBadge status={data?.trading_enabled ? 'ACTIVE' : 'INACTIVE'} showRaw />} />
+            <Row label="Node_A Execution (Crypto)" value={<StatusBadge status={data?.crypto_trading_enabled ? 'ACTIVE' : 'INACTIVE'} showRaw />} />
             
             <Row label="Node_B Execution (Stock)" value={<StatusBadge status={
               !data?.stock_trading_enabled ? 'INACTIVE'
@@ -182,7 +230,7 @@ export default function RuntimeRisk() {
               : ms === 'pre_market' ? 'pre-market'
               : ms === 'eod'        ? 'eod'
               : 'ACTIVE'
-            } />} />
+            } showRaw />} />
             
             <div className="grid grid-cols-2 gap-4 pt-2">
               <div className="bg-[#12141f] border border-surface-border rounded-lg p-3 text-center shadow-card-inset">
@@ -244,7 +292,7 @@ export default function RuntimeRisk() {
                       {w.label}
                     </span>
                   </div>
-                  <StatusBadge status={w.status} />
+                  <StatusBadge status={w.status} showRaw />
                 </div>
               )
             })}
@@ -282,15 +330,15 @@ export default function RuntimeRisk() {
                 <label className="text-[10px] text-gray-500 mono uppercase tracking-widest block">Global Execution Switch</label>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => mutateHalt.mutate()}
+                    onClick={() => { if (!adminToken) { showSysLog('AUTH REQUIRED', 'error'); return } mutateHalt.mutate() }}
                     disabled={!adminToken || mutateHalt.isPending}
                     className="flex-1 flex items-center justify-center gap-2 bg-system-offline/20 hover:bg-system-offline/40 text-system-offline border border-system-offline/50 py-2 rounded text-xs font-mono font-bold tracking-widest transition-all disabled:opacity-30 shadow-[0_0_15px_-5px_rgba(239,68,68,0.4)] hover:shadow-[0_0_20px_rgba(239,68,68,0.6)] uppercase"
                   >
                     {mutateHalt.isPending ? <Activity size={14} className="animate-pulse" /> : <ShieldAlert size={14} />}
-                    Halt All
+                    Soft Halt
                   </button>
                   <button
-                    onClick={() => mutateResume.mutate()}
+                    onClick={() => { if (!adminToken) { showSysLog('AUTH REQUIRED', 'error'); return } mutateResume.mutate() }}
                     disabled={!adminToken || mutateResume.isPending}
                     className="flex-1 flex items-center justify-center gap-2 bg-system-online/20 hover:bg-system-online/40 text-system-online border border-system-online/50 py-2 rounded text-xs font-mono font-bold tracking-widest transition-all disabled:opacity-30 shadow-[0_0_15px_-5px_rgba(16,185,129,0.4)] hover:shadow-[0_0_20px_rgba(16,185,129,0.6)] uppercase"
                   >
@@ -298,6 +346,29 @@ export default function RuntimeRisk() {
                     Resume
                   </button>
                 </div>
+              </div>
+
+              {/* Hard halt two-step flow */}
+              <div className="mt-4 space-y-2">
+                <label className="text-[10px] text-red-400 mono uppercase tracking-widest block">Hard Halt (Two-Step)</label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { if (!adminToken) { showSysLog('AUTH REQUIRED', 'error'); return } requestHaltHandler() }}
+                    disabled={!adminToken || requestingHalt}
+                    className="flex-1 py-2 rounded text-xs font-mono uppercase bg-red-600/10 text-red-400 border border-red-400/30 disabled:opacity-30"
+                  >
+                    {requestingHalt ? 'Requesting...' : 'Request Hard Halt Token'}
+                  </button>
+                  <div className="flex-1">
+                    <input type="text" value={confirmCode} onChange={e => setConfirmCode(e.target.value)} placeholder="Enter token to confirm" className="w-full bg-surface border border-surface-border rounded py-2 px-3 text-white font-mono text-sm" />
+                    <button onClick={() => { if (!adminToken) { showSysLog('AUTH REQUIRED', 'error'); return } confirmHaltHandler() }} disabled={!adminToken || confirmingHalt || !confirmCode} className="mt-2 w-full py-2 bg-red-600 text-white rounded text-xs">Confirm Hard Halt</button>
+                  </div>
+                </div>
+                {haltToken && (
+                  <div className="text-[12px] mono text-gray-400">Issued Token: <span className="text-white ml-2">{haltToken}</span></div>
+                )}
+                <div className="text-[12px] mono text-gray-500">Last Halt: <span className="text-white ml-2">{lastHalt ? JSON.stringify(lastHalt) : 'none'}</span></div>
+                <button onClick={() => loadLastHalt()} className="text-[10px] mono text-gray-400 mt-1">Refresh Halt Info</button>
               </div>
             </div>
 

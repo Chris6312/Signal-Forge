@@ -10,8 +10,8 @@ import {
   SortingState,
 } from '@tanstack/react-table'
 import { fetchOpenPositions } from '@/api/endpoints'
-import { 
-  Search, ArrowUpDown, TrendingUp, Activity, RefreshCw, 
+import {
+  Search, TrendingUp, Activity, RefreshCw, 
   ChevronRight, ChevronDown, Target, Shield, Zap, Info, Wallet
 } from 'lucide-react'
 import StatusBadge from '@/components/StatusBadge'
@@ -38,6 +38,10 @@ interface Position {
   pnl_realized: number | null
   fees_paid: number | null
   regime_at_entry: string | null
+  watchlist_source_id?: string | null
+  management_policy_version?: string | null
+  milestone_state?: Record<string, any> | null
+  frozen_policy?: Record<string, any> | null
 }
 
 const columnHelper = createColumnHelper<Position>()
@@ -58,7 +62,7 @@ export default function Positions() {
   const [globalFilter, setGlobalFilter] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
 
-  const { data, isLoading, isRefetching, refetch } = useQuery<Position[]>({
+  const { data, isRefetching, refetch } = useQuery<Position[]>({
     queryKey: ['positions', 'open'],
     queryFn: () => fetchOpenPositions(),
     staleTime: 10000, 
@@ -202,6 +206,22 @@ export default function Positions() {
             <tbody>
               {table.getRowModel().rows.map(row => {
                 const isExp = expanded === row.original.id
+                // Defensive helpers for milestone/frozen flags
+                const milestone = row.original.milestone_state || {}
+                const tp1Hit = Boolean(milestone?.tp1_hit)
+                // Trail is considered active when any of the following holds:
+                // - the frozen policy explicitly enabled it,
+                // - the worker has written an explicit `trail_active` flag on the milestone,
+                // - a `trailing_stop` value exists on the milestone (implies an active dynamic trail),
+                // - or the configured exit strategy indicates dynamic/trailing behaviour (heuristic).
+                const exitStrategy = String(row.original.exit_strategy || '')
+                const strategyIndicatesDynamicTrail = /dynamic|trail/i.test(exitStrategy)
+                const trailActive = Boolean(
+                  (row.original.frozen_policy?.trail_active) ||
+                  (milestone?.trail_active) ||
+                  (milestone?.trailing_stop) ||
+                  (tp1Hit && strategyIndicatesDynamicTrail)
+                )
                 return (
                   <React.Fragment key={row.id}>
                     <tr 
@@ -231,6 +251,17 @@ export default function Positions() {
                             <div className="space-y-4">
                               <SubMetric label="STOP_LOSS" value={formatCurrency(row.original.current_stop || row.original.initial_stop)} color="text-system-offline" icon={<Shield size={10} />} />
                               <SubMetric label="INITIAL_STOP" value={formatCurrency(row.original.initial_stop)} color="text-gray-500" />
+                              <div className="text-[12px] mono text-gray-400 mt-1">
+                                <div>PROTECTION_PROGRESS:</div>
+                                <div className="ml-2">Initial: {formatCurrency(row.original.initial_stop)}</div>
+                                <div className="ml-2">Current: {formatCurrency(row.original.current_stop)}</div>
+                                <div className="ml-2">TP1 Hit: {tp1Hit ? 'YES' : 'NO'}</div>
+                                <div className="ml-2">Trail Active: {trailActive ? 'YES' : 'NO'}</div>
+                                {trailActive && milestone?.trailing_stop && (
+                                  <div className="ml-2 text-[11px] text-gray-300">Trailing Stop: {formatCurrency(Number(milestone.trailing_stop))}</div>
+                                )}
+                                <div className="ml-2">Frozen Exit: {row.original.frozen_policy?.exit_strategy || row.original.exit_strategy || 'N/A'}</div>
+                              </div>
                             </div>
 
                             {/* Column 3: Profit Objectives */}
@@ -243,6 +274,11 @@ export default function Positions() {
                             <div className="space-y-4">
                               <SubMetric label="ALGO_ENTRY" value={row.original.entry_strategy} icon={<Info size={10} />} />
                               <SubMetric label="REALIZED_PnL" value={formatPnL(row.original.pnl_realized)} color={row.original.pnl_realized && row.original.pnl_realized >= 0 ? "text-system-online" : "text-system-offline"} icon={<Wallet size={10} />} />
+                              <div className="text-[12px] mono text-gray-400 mt-1">
+                                <div>MANAGEMENT_POLICY: <span className="text-white ml-1">{row.original.management_policy_version || 'unknown'}</span></div>
+                                <div className="mt-1">MILESTONE_STATE: <span className="text-white ml-1">{JSON.stringify(row.original.milestone_state || {})}</span></div>
+                                <div className="mt-1">FROZEN_POLICY: <span className="text-white ml-1">{JSON.stringify(row.original.frozen_policy || {})}</span></div>
+                              </div>
                             </div>
                           </div>
 

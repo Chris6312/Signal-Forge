@@ -35,7 +35,7 @@ export default function GlobalKillSwitch() {
         {/* CSS Hazard Stripes */}
         <div className="absolute inset-0 opacity-20 bg-[repeating-linear-gradient(45deg,transparent,transparent_8px,#000_8px,#000_16px)] pointer-events-none group-hover:opacity-30 transition-opacity"></div>
         <AlertOctagon size={16} className="relative z-10 animate-pulse" />
-        <span className="relative z-10 mono text-xs mt-0.5">ENGAGE_KILL_SWITCH</span>
+        <span className="relative z-10 mono text-xs mt-0.5">INITIATE_GLOBAL_HALT (soft)</span>
       </button>
 
       {/* The Confirmation Modal */}
@@ -62,7 +62,7 @@ export default function GlobalKillSwitch() {
               <div className="bg-system-offline/10 text-red-300 p-4 rounded-lg border border-system-offline/20 flex gap-3 text-sm">
                 <AlertTriangle size={18} className="shrink-0 mt-0.5" />
                 <p>
-                  Engaging the Kill Switch will immediately pause all active trading workers and cancel all pending open limit orders. <strong>This action bypasses standard exit strategies.</strong>
+                  This control sets the system-level trading flag to <strong>disabled</strong>. Workers will observe the flag and stop initiating new trades. This is a soft halt: it does not cancel existing open positions or pending orders and does not override exit policies.
                 </p>
               </div>
 

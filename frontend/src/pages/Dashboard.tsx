@@ -121,7 +121,7 @@ export default function Dashboard() {
                 )}
                 <span className="text-xs font-mono uppercase text-gray-400">Core Engine</span>
               </div>
-              <StatusBadge status={data.system_status} />
+              <StatusBadge status={data.system_status} showRaw />
             </div>
           )}
           <div className="w-[1px] h-6 bg-surface-border relative z-10"></div>
@@ -160,7 +160,7 @@ export default function Dashboard() {
                 <Server size={12} className={isOnline ? 'text-system-online drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]' : 'text-gray-600'} />
               </div>
               <div>
-                <StatusBadge status={data ? nodeStatus : 'unknown'} />
+                <StatusBadge status={data ? nodeStatus : 'unknown'} showRaw={true} />
               </div>
             </div>
           )

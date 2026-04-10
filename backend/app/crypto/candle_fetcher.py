@@ -14,8 +14,10 @@ from datetime import datetime, timezone
 
 from app.crypto.kraken_client import kraken_client
 from app.common.candle_store import CandleStore, TF_MINUTES
+from app.common.symbols import canonical_symbol
 
 logger = logging.getLogger(__name__)
+
 
 def _drop_incomplete_ohlcv(candles: list[list], interval_minutes: int) -> list[list]:
     if len(candles) < 2:
@@ -41,32 +43,34 @@ class CryptoCandleFetcher:
 
     async def backfill(self, symbol: str) -> None:
         """Fetch all timeframes for this symbol.  Called once per symbol at startup."""
+        can = canonical_symbol(symbol, asset_class="crypto")
         for tf in self.TIMEFRAMES:
             try:
                 interval = TF_MINUTES[tf]
-                candles = await kraken_client.get_ohlcv(symbol, interval=interval)
+                candles = await kraken_client.get_ohlcv(can, interval=interval)
                 candles = _drop_incomplete_ohlcv(candles, interval)
                 if candles:
-                    await self.store.update(symbol, interval, candles)
-                    logger.info("Backfill %s @%s: %d bars", symbol, tf, len(candles))
+                    await self.store.update(can, interval, candles)
+                    logger.info("Backfill %s @%s: %d bars", can, tf, len(candles))
                 await asyncio.sleep(self._RATE_PAUSE)
             except Exception as exc:
-                logger.warning("Backfill failed %s @%s: %s", symbol, tf, exc)
+                logger.warning("Backfill failed %s @%s: %s", can, tf, exc)
 
     async def refresh_if_needed(self, symbol: str) -> list[str]:
         """Refresh any timeframe whose candle has just closed (20 s gate)."""
         refreshed = []
+        can = canonical_symbol(symbol, asset_class="crypto")
         for tf in self.TIMEFRAMES:
             iv = TF_MINUTES[tf]
-            if not self.store.needs_refresh(symbol, iv):
+            if not self.store.needs_refresh(can, iv):
                 continue
             try:
-                candles = await kraken_client.get_ohlcv(symbol, interval=iv)
+                candles = await kraken_client.get_ohlcv(can, interval=iv)
                 candles = _drop_incomplete_ohlcv(candles, iv)
                 if candles:
-                    await self.store.update(symbol, iv, candles)
+                    await self.store.update(can, iv, candles)
                     refreshed.append(tf)
                 await asyncio.sleep(self._RATE_PAUSE)
             except Exception as exc:
-                logger.warning("Refresh failed %s @%s: %s", symbol, tf, exc)
+                logger.warning("Refresh failed %s @%s: %s", can, tf, exc)
         return refreshed

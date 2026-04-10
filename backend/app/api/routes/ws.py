@@ -99,6 +99,38 @@ async def websocket_endpoint(websocket: WebSocket):
             "topic": "market_status_update",
             "data":  build_market_status_payload(),
         }))
+        # Send ledger snapshots so ledger pages render without waiting for poll
+        try:
+            async with AsyncSessionLocal() as db:
+                accounts = (await db.execute(select(LedgerAccount))).scalars().all()
+                await websocket.send_text(json.dumps({
+                    "topic": "ledger_accounts_update",
+                    "data":  [
+                        {
+                            "id": str(a.id),
+                            "asset_class": a.asset_class,
+                            "cash_balance": a.cash_balance,
+                            "fees_total": a.fees_total,
+                            "realized_pnl": a.realized_pnl,
+                            "unrealized_pnl": a.unrealized_pnl,
+                            "last_reconciled_at": a.last_reconciled_at.isoformat() if a.last_reconciled_at else None,
+                            "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+                        }
+                        for a in accounts
+                    ],
+                }))
+                # Send a small recent entries snapshot (limit 100)
+                entries_stmt = select(LedgerAccount)
+                # note: ledger entries route handles entries; emit invalidation for entries
+                await websocket.send_text(json.dumps({
+                    "topic": "ledger_entries_update",
+                    "data": None,
+                    "action": "invalidate",
+                    "queryKey": ["ledger-entries"],
+                }))
+        except Exception:
+            # Non-critical: fail silently to avoid breaking WS connect
+            pass
 
         # Keep the connection alive; receive_text() raises WebSocketDisconnect on close
         while True:

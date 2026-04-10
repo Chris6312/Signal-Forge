@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.models.ledger import LedgerAccount, LedgerEntry, EntryType
+from app.common.models.order import Order, OrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,23 @@ async def record_paper_fill(
         created_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     db.add(entry)
+
+    # If an order row exists for this paper fill, mark it as filled so order lifecycle is complete.
+    try:
+        if order_id:
+            stmt = select(Order).where(Order.id == order_id)
+            result = await db.execute(stmt)
+            ord = result.scalar_one_or_none()
+            if ord:
+                ord.status = OrderStatus.FILLED
+                ord.fill_price = price
+                ord.filled_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                if not ord.broker_order_id:
+                    ord.broker_order_id = "PAPER_EXEC"
+                db.add(ord)
+                await db.flush()
+    except Exception as exc:
+        logger.warning("Failed to mark paper order filled for %s: %s", symbol, exc)
 
     if asset_class == "crypto":
         fee = round(cost * KRAKEN_TAKER_FEE_RATE, 8)

@@ -24,6 +24,9 @@ interface WatchlistSymbol {
   added_at: string | null
   removed_at: string | null
   managed_since: string | null
+  reason?: string | null
+  confidence?: number | null
+  tags?: string[] | null
 }
 
 const EXAMPLE_PAYLOAD = JSON.stringify(
@@ -47,6 +50,8 @@ export default function Watchlist() {
   const [filterClass, setFilterClass] = useState<string>('')
   const [globalFilter, setGlobalFilter] = useState('')
   const [sorting, setSorting] = useState<SortingState>([{ id: 'added_at', desc: true }])
+  const [tagFilter, setTagFilter] = useState<string>('')
+  const [confidenceSort, setConfidenceSort] = useState<'none' | 'asc' | 'desc'>('none')
   
   const [jsonInput, setJsonInput] = useState(EXAMPLE_PAYLOAD)
   const [jsonOpen, setJsonOpen] = useState(false)
@@ -107,6 +112,30 @@ export default function Watchlist() {
       header: 'ORIGIN_ID',
       cell: info => <span className="text-[10px] text-gray-500 font-mono bg-surface-card border border-surface-border px-1.5 py-0.5 rounded">{info.getValue() || 'MANUAL'}</span>,
     }),
+    columnHelper.accessor('reason', {
+      header: 'REASON',
+      cell: info => <span className="text-[12px] text-gray-300 max-w-[280px] truncate inline-block">{info.getValue() || '—'}</span>,
+    }),
+    columnHelper.accessor('confidence', {
+      header: 'CONF',
+      cell: info => {
+        const v = info.getValue()
+        return v == null ? <span className="text-gray-500">—</span> : <span className="text-xs font-mono text-white">{(v as number).toFixed(2)}</span>
+      }
+    }),
+    columnHelper.accessor('tags', {
+      header: 'TAGS',
+      cell: info => {
+        const tags = info.getValue() as string[] | null
+        if (!tags || tags.length === 0) return <span className="text-gray-500">—</span>
+        return (
+          <div className="flex items-center gap-2">
+            {tags.slice(0,3).map(t => <span key={t} className="text-[10px] px-2 py-0.5 rounded bg-surface-card border border-surface-border text-gray-300">{t}</span>)}
+            {tags.length > 3 && <span className="text-[10px] text-gray-500">+{tags.length - 3}</span>}
+          </div>
+        )
+      }
+    }),
     columnHelper.accessor('added_at', {
       header: 'ACQUIRED_AT',
       cell: info => {
@@ -133,8 +162,25 @@ export default function Watchlist() {
     }),
   ], [])
 
+  // Apply client-side tag filtering and confidence sorting before passing to the table
+  const filteredData = useMemo(() => {
+    let rows = data
+    if (tagFilter) {
+      const q = tagFilter.trim().toLowerCase()
+      rows = rows.filter(r => Array.isArray(r.tags) && r.tags.map((t: string) => t.toLowerCase()).includes(q))
+    }
+    if (confidenceSort !== 'none') {
+      rows = [...rows].sort((a, b) => {
+        const av = a.confidence ?? -Infinity
+        const bv = b.confidence ?? -Infinity
+        return confidenceSort === 'asc' ? av - bv : bv - av
+      })
+    }
+    return rows
+  }, [data, tagFilter, confidenceSort])
+
   const table = useReactTable({
-    data,
+    data: filteredData,
     columns,
     state: { sorting, globalFilter },
     onSortingChange: setSorting,
@@ -176,6 +222,24 @@ export default function Watchlist() {
             />
           </div>
           <div className="w-[1px] h-6 bg-surface-border"></div>
+          <div className="flex items-center gap-2">
+            <input
+              placeholder="Filter tag..."
+              value={tagFilter}
+              onChange={e => setTagFilter(e.target.value)}
+              className="bg-[#12141f] border border-surface-border rounded px-2 py-1 text-xs mono text-gray-300 focus:outline-none"
+            />
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setConfidenceSort(s => s === 'asc' ? 'none' : 'asc')}
+                className={clsx('text-[10px] px-2 py-1 rounded', confidenceSort === 'asc' ? 'bg-brand/20 text-brand' : 'text-gray-500')}
+              >Conf ↑</button>
+              <button
+                onClick={() => setConfidenceSort(s => s === 'desc' ? 'none' : 'desc')}
+                className={clsx('text-[10px] px-2 py-1 rounded', confidenceSort === 'desc' ? 'bg-brand/20 text-brand' : 'text-gray-500')}
+              >Conf ↓</button>
+            </div>
+          </div>
           <button onClick={() => refetch()} className="btn-ghost flex items-center gap-2 px-3">
             <RefreshCw size={14} className={isLoading || isRefetching ? 'animate-spin text-brand' : ''} />
             <span className="mono text-xs uppercase tracking-wider">Sync Array</span>
@@ -307,16 +371,30 @@ export default function Watchlist() {
                   </tr>
                 ))}
               </thead>
-              <tbody className="mono text-sm">
-                {table.getRowModel().rows.map(row => (
-                  <tr key={row.id} className="border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group">
-                    {row.getVisibleCells().map(cell => (
-                      <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
+            <tbody className="mono text-sm">
+                {table.getRowModel().rows.map(row => {
+                  const addedAt = row.original.added_at
+                  let isStale = false
+                  if (addedAt) {
+                    try {
+                      const then = new Date(addedAt).getTime()
+                      const ageMs = Date.now() - then
+                      // Mark stale if older than 7 days
+                      isStale = ageMs > 7 * 24 * 60 * 60 * 1000
+                    } catch (err) {
+                      console.debug('Watchlist: failed to parse added_at', err)
+                    }
+                  }
+                  return (
+                    <tr key={row.id} className={clsx("border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group", isStale && "bg-yellow-900/5") }>
+                      {row.getVisibleCells().map(cell => (
+                        <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                        </td>
+                      ))}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>

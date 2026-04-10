@@ -23,6 +23,13 @@ interface Candidate {
   top_strategy: string | null
   top_confidence: number | null
   top_entry: number | null
+  blocked_reason?: string | null
+  has_open_position?: boolean
+  cooldown_active?: boolean
+  regime_allowed?: boolean | null
+  evaluation_error?: string | null
+  top_notes?: string | null
+  position_or_order_status?: string | null
 }
 
 interface Signal {
@@ -98,13 +105,34 @@ export default function Monitoring() {
         </div>
       ),
     }),
+    columnHelper.display({
+      id: 'diagnostics',
+      header: 'DIAG',
+      cell: info => {
+        const row = info.row.original
+        const parts: string[] = []
+        if (row.evaluation_error) parts.push('ERR')
+        if (row.has_open_position) parts.push('OPEN_POS')
+        if (row.cooldown_active) parts.push('COOLDOWN')
+        if (row.regime_allowed === false) parts.push('REGIME_BLOCK')
+        if (row.blocked_reason) parts.push('BLOCKED')
+        return (
+          <div className="text-[10px] mono text-gray-400">
+            {parts.length === 0 ? <span className="text-system-online">READY</span> : parts.join(' • ')}
+          </div>
+        )
+      }
+    }),
     columnHelper.accessor('asset_class', {
       header: 'NODE',
       cell: info => <span className="text-xs text-gray-400 uppercase tracking-widest">{info.getValue()}</span>
     }),
     columnHelper.accessor('state', {
       header: 'SYS_STATE',
-      cell: info => <StatusBadge status={info.getValue()} />,
+      cell: info => {
+        const raw = info.getValue()
+        return <StatusBadge status={raw} showRaw />
+      },
     }),
     columnHelper.accessor('top_strategy', {
       header: 'PRIMARY_ALGO',
@@ -279,6 +307,15 @@ export default function Monitoring() {
                         <span className="text-brand font-bold mr-2">[{sig.regime}]</span>
                         {sig.notes}
                       </div>
+                      {/* Diagnostic area: if server returned extra diagnostics, show them */}
+                      {evalResult && evalResult.signals && evalResult.signals.length > 0 && (
+                        <div className="mt-2 text-[12px] text-gray-400 mono flex flex-col gap-1">
+                          {/* Top notes from monitoring candidate shown when available */}
+                          {evalResult && evalResult.signals && evalResult.signals[0] && evalResult.signals[0].notes && (
+                            <div>ANALYSIS_NOTES: <span className="text-white ml-1">{evalResult.signals[0].notes}</span></div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

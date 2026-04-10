@@ -21,6 +21,7 @@ from app.regime import regime_engine
 from app.regime.indicators import build_asset_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
 from app.crypto.candle_fetcher import CryptoCandleFetcher
+from app.common.symbols import canonical_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class CryptoMonitor:
 
             # Backfill any symbol not yet loaded into the candle store
             for ws in symbols:
-                if not self._store.is_loaded(ws.symbol, TF_MINUTES["1H"]):
+                if not self._store.is_loaded(canonical_symbol(ws.symbol, asset_class=ASSET_CLASS), TF_MINUTES["1H"]):
                     logger.info("Backfilling candles for %s", ws.symbol)
                     await self._fetcher.backfill(ws.symbol)
 
@@ -94,33 +95,53 @@ class CryptoMonitor:
             logger.warning("Regime refresh failed: %s", exc)
 
     async def _evaluate_symbol(self, db, ws: WatchlistSymbol):
-        already_open = await self._has_open_position(db, ws.symbol)
+        can = canonical_symbol(ws.symbol, asset_class=ASSET_CLASS)
+        already_open = await self._has_open_position(db, can)
         if already_open:
             return
 
+        # Prevent duplicate entry intents across concurrent monitor loops
+        intent_key = f"intent:crypto:{can}"
         try:
             redis = await get_redis()
-            if await redis.exists(f"{COOLDOWN_KEY_PREFIX}{ws.symbol}"):
-                logger.debug("Re-entry cooldown active for %s — skipping", ws.symbol)
+            locked = await redis.setnx(intent_key, "1")
+            if not locked:
+                logger.debug("Entry intent already in progress for %s — skipping", can)
+                return
+            # Set a short TTL to avoid stale locks
+            await redis.expire(intent_key, 60)
+        except Exception as exc:
+            logger.warning("Redis lock failed for %s: %s", can, exc)
+
+        try:
+            redis = await get_redis()
+            if await redis.exists(f"{COOLDOWN_KEY_PREFIX}{can}"):
+                logger.debug("Re-entry cooldown active for %s — skipping", can)
                 return
         except Exception as exc:
-            logger.warning("Cooldown check failed for %s: %s", ws.symbol, exc)
+            logger.warning("Cooldown check failed for %s: %s", can, exc)
 
         candles_by_tf = {
-            "15m":   self._store.get(ws.symbol, TF_MINUTES["15m"]),
-            "1H":    self._store.get(ws.symbol, TF_MINUTES["1H"]),
-            "4H":    self._store.get(ws.symbol, TF_MINUTES["4H"]),
-            "daily": self._store.get(ws.symbol, TF_MINUTES["daily"]),
+            "15m":   self._store.get(can, TF_MINUTES["15m"]),
+            "1H":    self._store.get(can, TF_MINUTES["1H"]),
+            "4H":    self._store.get(can, TF_MINUTES["4H"]),
+            "daily": self._store.get(can, TF_MINUTES["daily"]),
         }
 
-        signals = evaluate_all(ws.symbol, candles_by_tf)
+        signals = evaluate_all(can, candles_by_tf)
         if not signals:
+            try:
+                # release intent if no signal
+                redis = await get_redis()
+                await redis.delete(intent_key)
+            except Exception:
+                pass
             return
 
         best = signals[0]
         logger.info(
             "Entry signal for %s: %s (confidence=%.2f)",
-            ws.symbol, best.strategy, best.confidence
+            can, best.strategy, best.confidence
         )
 
         current_count = await self._count_open_positions(db)
@@ -129,9 +150,14 @@ class CryptoMonitor:
             logger.info("Entry blocked by regime [%s]: %s", regime_engine.crypto_regime, reason)
             return
 
-        await self._create_position(db, ws, best)
+        await self._create_position(db, ws, best, can)
+        try:
+            redis = await get_redis()
+            await redis.delete(intent_key)
+        except Exception:
+            pass
 
-    async def _create_position(self, db, ws: WatchlistSymbol, signal):
+    async def _create_position(self, db, ws: WatchlistSymbol, signal, canonical: str):
         from app.common.paper_ledger import size_paper_position, record_paper_fill
 
         trading_mode = await runtime_state.get_trading_mode()
@@ -161,7 +187,7 @@ class CryptoMonitor:
 
         position = Position(
             id=uuid.uuid4(),
-            symbol=ws.symbol,
+            symbol=canonical,
             asset_class=ASSET_CLASS,
             state=PositionState.OPEN,
             entry_price=signal.entry_price,
@@ -189,7 +215,7 @@ class CryptoMonitor:
         order = Order(
             id=uuid.uuid4(),
             position_id=position.id,
-            symbol=ws.symbol,
+            symbol=canonical,
             asset_class=ASSET_CLASS,
             order_type=OrderType.ENTRY,
             side=OrderSide.BUY,
@@ -203,15 +229,15 @@ class CryptoMonitor:
 
         if is_paper and quantity > 0:
             await record_paper_fill(
-                db, ASSET_CLASS, ws.symbol, position.id, order.id, quantity, signal.entry_price
+                db, ASSET_CLASS, canonical, position.id, order.id, quantity, signal.entry_price
             )
 
         await log_event(
             db,
             "POSITION_OPENED",
-            f"New {ASSET_CLASS} position: {ws.symbol} via {signal.strategy}",
+            f"New {ASSET_CLASS} position: {canonical} via {signal.strategy}",
             asset_class=ASSET_CLASS,
-            symbol=ws.symbol,
+            symbol=canonical,
             position_id=str(position.id),
             source=AuditSource.WORKER,
             event_data={
@@ -229,7 +255,7 @@ class CryptoMonitor:
         )
 
         ws_manager.broadcast_from_thread("position_executed", {
-            "symbol":      ws.symbol,
+            "symbol":      canonical,
             "side":        "BUY",
             "quantity":    float(quantity),
             "price":       signal.entry_price,

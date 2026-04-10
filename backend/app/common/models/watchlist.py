@@ -2,8 +2,8 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Index, String, DateTime, Text, Enum as SAEnum
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, Index, String, DateTime, Text, Enum as SAEnum, Float
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 
 from app.common.models.base import Base
 
@@ -32,6 +32,10 @@ class WatchlistSymbol(Base):
     state = Column(SAEnum(SymbolState, native_enum=False), nullable=False, default=SymbolState.ACTIVE)
     watchlist_source_id = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
+    # Decision metadata to aid auditability and operator clarity
+    reason = Column(Text, nullable=True)
+    confidence = Column(Float, nullable=True)
+    tags = Column(JSONB, nullable=True)
     added_at = Column(DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     removed_at = Column(DateTime, nullable=True)
     managed_since = Column(DateTime, nullable=True)
