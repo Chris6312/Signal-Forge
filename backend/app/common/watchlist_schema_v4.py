@@ -226,19 +226,82 @@ def _risk_reward_from_signal(signal) -> float:
     return clamp01(min(1.0, rr / 3.0))
 
 
-def _regime_fit_from_regime_and_strategy(regime: Optional[str], strategy_key: str) -> float:
-    if not regime:
-        return 0.5
-    if strategy_key == "trend_continuation":
-        return 1.0 if regime == "trending_up" else 0.2
-    if strategy_key == "pullback_reclaim":
-        return 0.9 if regime == "trending_up" else 0.4
-    if strategy_key == "mean_reversion_bounce":
-        return 1.0 if regime == "ranging" else 0.1
-    if strategy_key == "range_breakout":
-        return 0.7 if regime in ("trending_up", "ranging") else 0.3
-    return 0.5
+def _regime_fit_from_regime_and_strategy(regime: str | None, strategy_key: str) -> float:
+    regime = (regime or "unknown").lower().strip()
+    strategy_key = (strategy_key or "").lower().strip()
 
+    # Uptrend-friendly strategies
+    if strategy_key == "trend_continuation":
+        if regime == "trending_up":
+            return 1.0
+        if regime == "ranging":
+            return 0.35
+        if regime == "trending_down":
+            return 0.05
+        return 0.20
+
+    if strategy_key == "breakout_retest":
+        if regime == "trending_up":
+            return 0.80
+        if regime == "ranging":
+            return 0.45
+        if regime == "trending_down":
+            return 0.05
+        return 0.20
+
+    # Pullback / reclaim longs work best in healthy uptrends,
+    # but can still function somewhat in ranges.
+    if strategy_key == "pullback_reclaim":
+        if regime == "trending_up":
+            return 0.9
+        if regime == "ranging":
+            return 0.4
+        if regime == "trending_down":
+            return 0.05
+        return 0.25
+
+    # Mean reversion prefers range / neutral conditions.
+    if strategy_key == "mean_reversion_bounce":
+        if regime == "ranging":
+            return 1.0
+        if regime == "unknown":
+            return 0.35
+        if regime == "trending_up":
+            return 0.1
+        if regime == "trending_down":
+            return 0.1
+        return 0.2
+
+    # Range rotation should prefer actual ranges, not intact uptrends.
+    if strategy_key == "range_rotation":
+        if regime == "ranging":
+            return 1.0
+        if regime == "unknown":
+            return 0.35
+        if regime == "trending_up":
+            return 0.15
+        if regime == "trending_down":
+            return 0.1
+        return 0.2
+
+    # Backward compatibility with any older bucket name still present.
+    if strategy_key == "range_breakout":
+        if regime == "trending_up":
+            return 0.7
+        if regime == "ranging":
+            return 0.45
+        if regime == "trending_down":
+            return 0.1
+        return 0.25
+
+    # Safe fallback
+    if regime == "trending_up":
+        return 0.5
+    if regime == "ranging":
+        return 0.5
+    if regime == "trending_down":
+        return 0.1
+    return 0.2
 
 def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "stock") -> dict:
     """Return normalized component scores for a strategy signal.
@@ -278,6 +341,15 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
     ema200 = _float(reasoning.get("ema200"), None)
     atr = _float(reasoning.get("atr"), None)
 
+    higher_highs = bool(reasoning.get("higher_highs_confirmed"))
+    higher_lows = bool(reasoning.get("higher_lows_confirmed"))
+    higher_closes = bool(reasoning.get("higher_closes_confirmed"))
+    ascending_closes = bool(reasoning.get("three_ascending_closes"))
+    dip_below_ema = bool(reasoning.get("dip_below_ema_confirmed"))
+    reclaim_confirmed = bool(reasoning.get("reclaim_confirmed"))
+    price_in_retest_band = bool(reasoning.get("price_in_retest_band"))
+    bounce_confirmed = bool(reasoning.get("bounce_confirmed"))
+
     stack_score = 0.0
     stack_pairs = 0
     for a, b, weight in ((ema9, ema20, 0.34), (ema20, ema50, 0.33), (ema50, ema200, 0.33)):
@@ -288,15 +360,15 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
             stack_score += weight
 
     structure = stack_score if stack_pairs else _structure_score_from_reasoning(reasoning)
-    if reasoning.get("higher_highs_confirmed"):
+    if higher_highs:
         structure += 0.12
-    if reasoning.get("higher_lows_confirmed"):
+    if higher_lows:
         structure += 0.12
-    if reasoning.get("higher_closes_confirmed"):
+    if higher_closes:
         structure += 0.08
-    if reasoning.get("three_ascending_closes"):
+    if ascending_closes:
         structure += 0.08
-    if reasoning.get("dip_below_ema_confirmed") or reasoning.get("reclaim_confirmed"):
+    if dip_below_ema or reclaim_confirmed:
         structure += 0.05
     structure = clamp01(structure)
 
@@ -330,44 +402,49 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
                 momentum += clamp01(((float(hist[-1]) - float(hist[-5])) / max(abs(close), 1.0)) * 24.0)
             except Exception:
                 pass
+
     current_vs_ema20 = _float(reasoning.get("current_vs_ema20"), None)
     if current_vs_ema20 is not None and close:
         momentum += clamp01((current_vs_ema20 / max(abs(close), 1.0)) * 18.0)
+
     breakout_pct = _float(reasoning.get("breakout_pct"), None)
-    breakout_up_pct = max(0.0, breakout_pct or 0.0)
-    breakout_down_pct = max(0.0, -(breakout_pct or 0.0))
+    positive_breakout = max(0.0, breakout_pct or 0.0)
+    negative_breakout = max(0.0, -(breakout_pct or 0.0))
     if breakout_pct is not None:
-        momentum += clamp01(breakout_up_pct / 2.0) * 0.35
-        momentum -= clamp01(breakout_down_pct / 2.0) * 0.20
-    if reasoning.get("higher_closes_confirmed"):
+        momentum += clamp01(positive_breakout / 2.0) * 0.35
+        if negative_breakout > 0:
+            momentum -= clamp01(negative_breakout / 2.5) * 0.10
+
+    if higher_closes:
         momentum += 0.10
-    if reasoning.get("three_ascending_closes"):
+    if ascending_closes:
         momentum += 0.10
-    if breakout_down_pct > 0 and not reasoning.get("higher_closes_confirmed"):
-        momentum -= 0.08
     momentum = clamp01(momentum)
 
     reclaim_or_breakout = 0.0
     trigger_type = str(reasoning.get("trigger_type") or "").lower()
-    if trigger_type in {"breakout", "continuation"}:
+    is_breakout_family = trigger_type in {"breakout", "continuation"}
+
+    if is_breakout_family:
         reclaim_or_breakout += 0.35
     if trigger_type in {"reclaim", "pullback", "failed_breakdown_reclaim"}:
         reclaim_or_breakout += 0.35
     if trigger_type in {"mean_reversion", "range_reversal"}:
         reclaim_or_breakout += 0.25
+
     if breakout_pct is not None:
-        reclaim_or_breakout += clamp01(breakout_up_pct / 1.5) * 0.35
-        reclaim_or_breakout -= clamp01(breakout_down_pct / 1.5) * 0.15
-    if reasoning.get("dip_below_ema_confirmed"):
+        reclaim_or_breakout += clamp01(positive_breakout / 1.5) * 0.35
+        if negative_breakout > 0 and is_breakout_family:
+            reclaim_or_breakout -= clamp01(negative_breakout / 2.0) * 0.12
+
+    if dip_below_ema:
         reclaim_or_breakout += 0.20
-    if reasoning.get("reclaim_confirmed"):
+    if reclaim_confirmed:
         reclaim_or_breakout += 0.20
-    if reasoning.get("price_in_retest_band"):
+    if price_in_retest_band:
         reclaim_or_breakout += 0.15
-    if reasoning.get("bounce_confirmed"):
+    if bounce_confirmed:
         reclaim_or_breakout += 0.15
-    if trigger_type in {"breakout", "continuation"} and breakout_up_pct <= 0.0:
-        reclaim_or_breakout -= 0.12
     reclaim_or_breakout = clamp01(reclaim_or_breakout)
 
     volume = 0.5
@@ -384,29 +461,90 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
         fallback_stop = _float(reasoning.get("fallback_stop"), None)
         fallback_tp = _float(reasoning.get("fallback_tp1"), None)
         if fallback_stop is not None and fallback_tp is not None:
-            class _Tmp: pass
+            class _Tmp:
+                pass
+
             tmp = _Tmp()
             tmp.entry_price = close
             tmp.initial_stop = fallback_stop
             tmp.profit_target_1 = fallback_tp
             risk_reward = _risk_reward_from_signal(tmp)
 
-    extension_penalty = 0.0
-    if close is not None and ema20 is not None:
-        extension_penalty += clamp01(max(0.0, close - ema20) / max(abs(close), 1.0) * 10.0) * 0.40
-    if close is not None and ema50 is not None:
-        extension_penalty += clamp01(max(0.0, close - ema50) / max(abs(close), 1.0) * 6.0) * 0.20
-    stall_penalty = 0.0
-    if trigger_type in {"breakout", "continuation"} and breakout_up_pct < 0.2:
-        stall_penalty += 0.20
-    if not reasoning.get("higher_highs_confirmed") and not reasoning.get("higher_lows_confirmed"):
-        stall_penalty += 0.15
-    if breakout_down_pct > 0.0:
-        stall_penalty += clamp01(breakout_down_pct / 2.5) * 0.30
-    if current_vs_ema20 is not None and current_vs_ema20 < 0:
-        stall_penalty += clamp01(abs(current_vs_ema20) / max(abs(close or 1.0), 1.0) * 18.0) * 0.20
+    # Trend persistence guardrail:
+    # strong trends should not be mistaken for rotation just because
+    # momentum is cooling or candles are compressing near highs.
+    trend_stack_strong = bool(
+        ema20 is not None
+        and ema50 is not None
+        and ema20 > ema50
+        and (
+            ema200 is None
+            or ema50 > ema200
+        )
+    )
+    price_above_trend_base = bool(
+        close is not None
+        and ema20 is not None
+        and close >= ema20
+        and (
+            ema50 is None
+            or close >= ema50
+        )
+    )
+    trend_persistence = bool(
+        regime == "trending_up"
+        and trend_stack_strong
+        and price_above_trend_base
+        and higher_lows
+    )
+    strong_trend_persistence = bool(
+        trend_persistence
+        and higher_highs
+        and trend_alignment >= 0.72
+    )
 
-    trend_maturity_penalty = clamp01(extension_penalty + stall_penalty)
+    maturity_penalty = 0.0
+    if close is not None and atr and atr > 0 and ema20 is not None:
+        extension_atr = max(0.0, (close - ema20) / atr)
+        maturity_penalty += clamp01((extension_atr - 1.0) / 2.5) * 0.40
+
+    if is_breakout_family:
+        if not higher_highs:
+            maturity_penalty += 0.08
+        if not higher_closes:
+            maturity_penalty += 0.08
+        if not ascending_closes:
+            maturity_penalty += 0.06
+        if price_in_retest_band and positive_breakout < 0.2:
+            maturity_penalty += 0.06
+        if regime != "trending_up":
+            maturity_penalty += 0.05
+    elif strategy_key == "pullback_reclaim":
+        if close is not None and atr and atr > 0 and ema20 is not None and close > ema20:
+            maturity_penalty += clamp01(((close - ema20) / atr - 1.5) / 2.0) * 0.15
+
+    if breakout_pct is not None and positive_breakout < 0.1 and negative_breakout == 0 and is_breakout_family:
+        maturity_penalty += 0.04
+
+    # New micro-adjustment:
+    # when the trend is obviously still intact, suppress reversal/range behavior a bit.
+    # This keeps BTC/ETH/HYPE/ZEC from drifting into rotation labels during healthy pauses.
+    if strong_trend_persistence:
+        if strategy_key == "mean_reversion_bounce":
+            maturity_penalty += 0.16
+        elif strategy_key == "range_breakout":
+            # only dampen the range bucket when it lacks real breakout/retest evidence
+            if positive_breakout < 0.75 and not price_in_retest_band:
+                maturity_penalty += 0.14
+            if not dip_below_ema and not bounce_confirmed and not reclaim_confirmed:
+                maturity_penalty += 0.10
+        elif strategy_key == "pullback_reclaim":
+            # keep pullback reclaim competitive in healthy trends, but soften it
+            # slightly when there was no actual reclaim event.
+            if not dip_below_ema and not reclaim_confirmed:
+                maturity_penalty += 0.05
+
+    maturity_penalty = clamp01(maturity_penalty)
 
     features = {
         "structure": structure,
@@ -416,20 +554,23 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
         "volume": clamp01(volume),
         "risk_reward": clamp01(risk_reward),
         "regime_fit": _regime_fit_from_regime_and_strategy(regime, strategy_key),
-        "trend_maturity_penalty": trend_maturity_penalty,
+        "trend_maturity_penalty": maturity_penalty,
         "_diagnostics": {
-            "price_location": round(clamp01(((current_vs_ema20 or 0.0) / max(atr or 1.0, 1e-6)) * 0.5 + 0.5), 6) if atr else 0.5,
-            "volatility_context": round(clamp01(1.0 - ((atr or 0.0) / max(abs(close or 1.0), 1.0))), 6),
+            "price_location": round(
+                clamp01(((current_vs_ema20 or 0.0) / max(atr or 1.0, 1e-6)) * 0.5 + 0.5),
+                6,
+            ) if atr else 0.5,
+            "volatility_context": round(
+                clamp01(1.0 - ((atr or 0.0) / max(abs(close or 1.0), 1.0))),
+                6,
+            ),
             "signal_schema_version": reasoning.get("signal_schema_version", "v2"),
             "trigger_type": trigger_type or None,
-            "breakout_up_pct": round(breakout_up_pct, 6),
-            "breakout_down_pct": round(breakout_down_pct, 6),
-            "trend_maturity_penalty": round(trend_maturity_penalty, 6),
+            "trend_persistence": trend_persistence,
+            "strong_trend_persistence": strong_trend_persistence,
         },
     }
     return {k: clamp01(v) if k != "_diagnostics" else v for k, v in features.items()}
-
-
 
 def score_strategy_from_candles(strategy: str, features: dict) -> float:
     """Compute a normalized 0..1-ish score from candle-derived features only.

@@ -676,15 +676,22 @@ def _strategy_specific_bonus(strategy_key: str, signal: StockEntrySignal) -> flo
 
     elif strategy_key == "range_breakout":
         breakout_pct = float(reasoning.get("breakout_pct") or 0.0)
+        breakout_confirmed = bool(
+            reasoning.get("higher_highs_confirmed")
+            or reasoning.get("higher_closes_confirmed")
+            or reasoning.get("price_in_retest_band")
+        )
 
-        # Reward true upside expansion, but keep the bonus smaller so the
-        # breakout bucket does not dominate on generic bullish charts.
-        if breakout_pct >= 5.0:
-            bonus += 0.18
-        elif breakout_pct >= 2.0:
-            bonus += 0.12
-        elif breakout_pct > 0.2:
-            bonus += 0.06
+        # Keep the breakout reward for true expansion / retest behavior, but
+        # stop handing it out to every chart that is merely a bit above recent
+        # highs after an aging impulse.
+        if breakout_confirmed:
+            if breakout_pct >= 5.0:
+                bonus += 0.20
+            elif breakout_pct >= 2.0:
+                bonus += 0.14
+            elif breakout_pct > 0.2:
+                bonus += 0.08
 
     elif strategy_key == "mean_reversion_bounce":
         if reasoning.get("bounce_confirmed"):
@@ -789,18 +796,12 @@ def evaluate_all(
             summary = strategy_summaries.get(pat)
             if not summary:
                 continue
-            if best is None:
-                best = summary
-                continue
-            summary_rank = (1 if summary.get("raw_signal_present") else 0, summary["base_score"])
-            best_rank = (1 if best.get("raw_signal_present") else 0, best["base_score"])
-            if summary_rank > best_rank:
+            if best is None or summary["base_score"] > best["base_score"]:
                 best = summary
 
         if best:
             matched = best["signal"]
             feature_scores = best["feature_scores"]
-            raw_signal_present = bool(best.get("raw_signal_present"))
 
             base_score = compute_strategy_score(
                 key,
@@ -808,24 +809,24 @@ def evaluate_all(
                 regime=getattr(matched, "regime", None),
                 asset_class="stock",
             )
-            if raw_signal_present:
-                base_score = min(1.0, base_score + _strategy_specific_bonus(key, matched))
+            base_score = min(1.0, base_score + _strategy_specific_bonus(key, matched))
 
             # AI hint bias must never rescue a structurally invalid setup.
             # Keep scores visible for diagnostics, but only allow bias when the
             # real strategy produced a concrete signal and the regime fit is not weak.
             regime_fit = float(feature_scores.get("regime_fit", 0.0) or 0.0)
+            raw_signal_present = bool(best.get("raw_signal_present"))
             bias_allowed = raw_signal_present and regime_fit >= 0.5
 
             bias = compute_hint_bias(ai_hint, key) if (ai_hint and bias_allowed) else 0.0
             final_score = min(1.0, base_score + bias)
 
             evaluated[key] = {
-                "valid": raw_signal_present,
+                "valid": True,
                 "base_score": round(base_score, 6),
                 "bias": round(bias, 6),
                 "final_score": round(final_score, 6),
-                "reason": None if raw_signal_present else "no_live_signal",
+                "reason": None,
                 "feature_scores": {k2: round(v2, 6) for k2, v2 in feature_scores.items() if k2 != "_diagnostics"},
                 "bias_allowed": bias_allowed,
             }

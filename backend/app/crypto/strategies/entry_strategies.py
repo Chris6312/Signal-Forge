@@ -60,24 +60,73 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         trigger_type = "reclaim"
     elif strategy_key == "mean_reversion_bounce":
         trigger_type = "mean_reversion"
+    elif strategy_key == "range_rotation":
+        trigger_type = "range_reversal"
+    elif strategy_key == "breakout_retest":
+        trigger_type = "breakout"
     elif strategy_key == "range_breakout":
         trigger_type = "breakout"
 
     dip_below_ema_confirmed = bool(
-        ema20 and len(closes) >= 6 and any(
+        ema20
+        and len(closes) >= 6
+        and any(
             closes[i] < _ema_value_at(ema20, 20, i)
             for i in range(max(1, len(closes) - 6), len(closes) - 1)
             if _ema_value_at(ema20, 20, i) is not None
         )
     )
+    bounce_confirmed = bool(len(closes) >= 2 and closes[-1] > closes[-2])
     reclaim_confirmed = bool(
         ema20
-        and dip_below_ema_confirmed
         and current > ema20[-1]
-        and len(closes) >= 2
-        and closes[-1] > closes[-2]
-        and ((current - ema20[-1]) >= max(atr * 0.10, current * 0.001) if atr > 0 else True)
+        and (
+            dip_below_ema_confirmed
+            or (len(closes) >= 2 and closes[-2] <= ema20[-1] and current > closes[-2])
+            or (bounce_confirmed and len(ema20) >= 2 and ema20[-1] >= ema20[-2])
+        )
     )
+
+    higher_highs_confirmed = bool(len(highs) >= 4 and highs[-4] < highs[-3] < highs[-2] < highs[-1])
+    higher_lows_confirmed = bool(len(lows) >= 4 and lows[-4] < lows[-3] < lows[-2] < lows[-1])
+    higher_closes_confirmed = bool(len(closes) >= 4 and closes[-4] < closes[-3] < closes[-2] < closes[-1])
+    three_ascending_closes = bool(len(closes) >= 3 and closes[-3] < closes[-2] < closes[-1])
+
+    # Shared defaults
+    breakout_pct = round(((current / max(recent_high, 1e-6)) - 1.0) * 100.0, 3) if recent_high else 0.0
+    price_in_retest_band = bool(recent_high and abs(current - recent_high) / max(abs(recent_high), 1.0) <= 0.015)
+    fallback_stop = round((recent_low - atr * 0.5) if recent_low else current - atr * 0.5, 6)
+    fallback_tp1 = round(current + atr * 1.5, 6)
+
+    # Separate the 4H patterns so they do not share the same interpretation.
+    if strategy_key == "range_rotation":
+        range_lookback = 30 if len(highs) >= 31 else max(5, len(highs) - 1)
+        range_high = max(highs[-range_lookback:-1]) if len(highs) > 1 else current
+        range_low = min(lows[-range_lookback:-1]) if len(lows) > 1 else current
+        range_mid = (range_high + range_low) / 2.0 if range_high and range_low else current
+        range_width = max(range_high - range_low, 1e-6)
+        distance_from_low_pct = ((current - range_low) / range_width) * 100.0 if range_width else 50.0
+
+        breakout_pct = round(((current - range_mid) / max(abs(range_mid), 1e-6)) * 100.0, 3)
+        price_in_retest_band = False
+        fallback_stop = round(range_low - atr * 0.5, 6)
+        fallback_tp1 = round(min(range_high, current + atr * 1.5), 6)
+
+    elif strategy_key == "breakout_retest":
+        lookback = 40 if len(highs) >= 41 else max(12, len(highs) - 1)
+        prior_high = max(highs[-lookback:-10]) if len(highs) >= 12 else recent_high
+        breakout_high = max(highs[-10:-1]) if len(highs) >= 11 else recent_high
+        retest_low = min(lows[-4:-1]) if len(lows) >= 5 else recent_low
+
+        breakout_anchor = prior_high if prior_high else recent_high
+        breakout_pct = round(((current / max(breakout_anchor, 1e-6)) - 1.0) * 100.0, 3)
+        price_in_retest_band = bool(
+            breakout_anchor
+            and retest_low
+            and abs(retest_low - breakout_anchor) / max(abs(breakout_anchor), 1.0) <= 0.02
+        )
+        fallback_stop = round(min(retest_low, breakout_anchor) - atr * 0.5, 6)
+        fallback_tp1 = round(current + atr * 2.0, 6)
 
     reasoning = {
         "signal_schema_version": "v2",
@@ -92,22 +141,53 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         "ema20_past": round(ema20[-5], 6) if ema20 and len(ema20) >= 5 else None,
         "ema20_history": [round(v, 6) for v in ema20[-5:]] if ema20 else [],
         "current_vs_ema20": round(current - ema20[-1], 6) if ema20 else 0.0,
-        "breakout_pct": round(((current / max(recent_high, 1e-6)) - 1.0) * 100.0, 3) if recent_high else 0.0,
+        "breakout_pct": breakout_pct,
         "volume_ratio": round(volume_ratio, 6),
-        "higher_highs_confirmed": bool(len(highs) >= 4 and highs[-4] < highs[-3] < highs[-2] < highs[-1]),
-        "higher_lows_confirmed": bool(len(lows) >= 4 and lows[-4] < lows[-3] < lows[-2] < lows[-1]),
-        "higher_closes_confirmed": bool(len(closes) >= 4 and closes[-4] < closes[-3] < closes[-2] < closes[-1]),
-        "three_ascending_closes": bool(len(closes) >= 3 and closes[-3] < closes[-2] < closes[-1]),
+        "higher_highs_confirmed": higher_highs_confirmed,
+        "higher_lows_confirmed": higher_lows_confirmed,
+        "higher_closes_confirmed": higher_closes_confirmed,
+        "three_ascending_closes": three_ascending_closes,
         "dip_below_ema_confirmed": dip_below_ema_confirmed,
         "reclaim_confirmed": reclaim_confirmed,
-        "price_in_retest_band": bool(recent_high and abs(current - recent_high) / max(abs(recent_high), 1.0) <= 0.015),
-        "bounce_confirmed": bool(len(closes) >= 2 and closes[-1] > closes[-2]),
+        "price_in_retest_band": price_in_retest_band,
+        "bounce_confirmed": bounce_confirmed,
         "trigger_type": trigger_type,
         "recent_high_20": round(recent_high, 6) if recent_high else None,
         "recent_low_20": round(recent_low, 6) if recent_low else None,
-        "fallback_stop": round((recent_low - atr * 0.5) if recent_low else current - atr * 0.5, 6),
-        "fallback_tp1": round(current + atr * 1.5, 6),
+        "fallback_stop": fallback_stop,
+        "fallback_tp1": fallback_tp1,
     }
+
+    if strategy_key == "range_rotation":
+        range_lookback = 30 if len(highs) >= 31 else max(5, len(highs) - 1)
+        range_high = max(highs[-range_lookback:-1]) if len(highs) > 1 else current
+        range_low = min(lows[-range_lookback:-1]) if len(lows) > 1 else current
+        range_mid = (range_high + range_low) / 2.0 if range_high and range_low else current
+        range_width = max(range_high - range_low, 1e-6)
+        distance_from_low_pct = ((current - range_low) / range_width) * 100.0 if range_width else 50.0
+
+        reasoning.update(
+            {
+                "range_low_30": round(range_low, 6) if range_low else None,
+                "range_high_30": round(range_high, 6) if range_high else None,
+                "range_mid_30": round(range_mid, 6) if range_mid else None,
+                "distance_from_low_pct": round(distance_from_low_pct, 3),
+            }
+        )
+
+    elif strategy_key == "breakout_retest":
+        lookback = 40 if len(highs) >= 41 else max(12, len(highs) - 1)
+        prior_high = max(highs[-lookback:-10]) if len(highs) >= 12 else recent_high
+        breakout_high = max(highs[-10:-1]) if len(highs) >= 11 else recent_high
+        retest_low = min(lows[-4:-1]) if len(lows) >= 5 else recent_low
+
+        reasoning.update(
+            {
+                "prior_high_40": round(prior_high, 6) if prior_high else None,
+                "breakout_high_10": round(breakout_high, 6) if breakout_high else None,
+                "retest_low": round(retest_low, 6) if retest_low else None,
+            }
+        )
     return EntrySignal(
         strategy=strategy_name,
         symbol=symbol,
@@ -530,12 +610,20 @@ STRONG_SIGNAL_THRESHOLD = 0.60
 def _strategy_name_to_key(name: str) -> str | None:
     if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
         return "pullback_reclaim"
+
     if "Momentum Breakout Continuation" in name:
         return "trend_continuation"
+
     if "Mean Reversion Bounce" in name:
         return "mean_reversion_bounce"
-    if any(p in name for p in ("Range Rotation Reversal", "Breakout Retest Hold")):
-        return "range_breakout"
+
+    # keep range patterns separated so strong trends do not get bucket-dominated
+    if "Range Rotation Reversal" in name:
+        return "range_rotation"
+
+    if "Breakout Retest Hold" in name:
+        return "breakout_retest"
+
     return None
 
 
@@ -584,7 +672,6 @@ def evaluate_all(symbol, candles_by_tf):
                 "feature_scores": feature_scores,
                 "base_score": round(base_score, 6),
                 "passes_threshold": round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
-                "raw_signal_present": sig is not None,
             }
 
             if strategy_summaries[strat.name]["passes_threshold"]:
@@ -598,7 +685,10 @@ def evaluate_all(symbol, candles_by_tf):
         "pullback_reclaim": ["Pullback Reclaim", "Failed Breakdown Reclaim"],
         "trend_continuation": ["Momentum Breakout Continuation"],
         "mean_reversion_bounce": ["Mean Reversion Bounce"],
-        "range_breakout": ["Range Rotation Reversal", "Breakout Retest Hold"],
+
+        # separated buckets
+        "range_rotation": ["Range Rotation Reversal"],
+        "breakout_retest": ["Breakout Retest Hold"],
     }
 
     evaluated = {}
@@ -608,24 +698,18 @@ def evaluate_all(symbol, candles_by_tf):
             summary = strategy_summaries.get(pattern)
             if not summary:
                 continue
-            if best is None:
-                best = summary
-                continue
-            summary_rank = (1 if summary.get("raw_signal_present") else 0, summary["base_score"])
-            best_rank = (1 if best.get("raw_signal_present") else 0, best["base_score"])
-            if summary_rank > best_rank:
+            if best is None or summary["base_score"] > best["base_score"]:
                 best = summary
         if best:
             signal = best["signal"]
             feature_scores = best["feature_scores"]
-            raw_signal_present = bool(best.get("raw_signal_present"))
             base_score = compute_strategy_score(key, feature_scores, regime=getattr(signal, "regime", None), asset_class="crypto")
             evaluated[key] = {
-                "valid": raw_signal_present,
+                "valid": True,
                 "base_score": round(base_score, 6),
                 "bias": 0.0,
                 "final_score": round(base_score, 6),
-                "reason": None if raw_signal_present else "no_live_signal",
+                "reason": None,
                 "feature_scores": {k: round(v, 6) for k, v in feature_scores.items() if k != "_diagnostics"},
             }
         else:
