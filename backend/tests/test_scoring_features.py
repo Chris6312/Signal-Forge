@@ -141,3 +141,43 @@ def test_no_identical_flat_scores_regression(caplog):
     scores = list(payload["evaluated_strategy_scores"].values())
     # ensure not all four are identical
     assert len(set(scores)) > 1
+
+
+def test_compute_features_activates_trend_and_momentum_for_rich_signal():
+    class S: pass
+    s = S()
+    s.entry_price = 105.0
+    s.initial_stop = 101.0
+    s.profit_target_1 = 111.0
+    s.regime = "trending_up"
+    s.reasoning = {
+        "signal_schema_version": "v2",
+        "ema9": 104.8,
+        "ema20": 104.0,
+        "ema50": 102.5,
+        "ema200": 98.0,
+        "ema20_past": 102.9,
+        "ema20_history": [102.8, 103.0, 103.3, 103.7, 104.0],
+        "current_vs_ema20": 1.0,
+        "breakout_pct": 1.8,
+        "volume_ratio": 1.4,
+        "higher_highs_confirmed": True,
+        "higher_lows_confirmed": True,
+        "higher_closes_confirmed": True,
+        "trigger_type": "continuation",
+        "atr": 1.2,
+    }
+    features = compute_features_for_signal("trend_continuation", s, asset_class="crypto")
+    assert features["trend_alignment"] > 0.5
+    assert features["momentum"] > 0.35
+    assert features["reclaim_or_breakout"] > 0.35
+
+
+def test_crypto_scores_are_not_flat_zero_with_trending_data(caplog):
+    caplog.set_level("INFO")
+    evaluate_crypto("SOL/USD", trending_up_ohlcv(80))
+    payload = _extract_audit_from_caplog(caplog)
+    assert payload is not None
+    vals = list(payload["evaluated_strategy_scores"].values())
+    assert any(v > 0.0 for v in vals)
+    assert len(set(vals)) > 1

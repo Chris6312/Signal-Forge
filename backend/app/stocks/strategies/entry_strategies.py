@@ -1,3 +1,4 @@
+from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from app.common.models.audit import AuditSource
 import json
 from app.common.models.bot_decision import BotStrategyDecision
 from app.common.database import AsyncSessionLocal
-from datetime import datetime, timezone
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -87,61 +88,136 @@ def _ema_value_at(ema_series: list[float], period: int, idx: int) -> Optional[fl
     ema_idx = idx - (period - 1)
     if ema_idx < 0 or ema_idx >= len(ema_series):
         return None
+    return float(ema_series[ema_idx])
 
 
-def _extract_candle_features_from_primary(strategy_key: str, primary: list[dict]):
-    """Build a synthetic signal from candles and return feature scores dict.
-
-    This avoids depending on strategy.evaluate() to create a candidate — we
-    derive normalized features directly from the primary timeframe candles
-    and reuse existing compute_features_for_signal to ensure parity.
-    """
+def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, primary: list[dict], tf_minutes: int) -> StockEntrySignal:
     closes = _closes(primary)
-    if not closes:
-        # fallback neutral features
-        class _S: pass
-        s = _S()
-        s.reasoning = {}
-        s.regime = None
-        s.entry_price = 0.0
-        s.initial_stop = 0.0
-        s.profit_target_1 = 0.0
-        return compute_features_for_signal(strategy_key, s)
-
-    ema20 = _ema(closes, 20)
-    ema50 = _ema(closes, 50)
+    highs = _highs(primary)
+    lows = _lows(primary)
     current = closes[-1]
     atr = _atr_from_history(primary)
     regime = _detect_regime(primary)
 
-    reasoning = {}
-    if ema20:
-        reasoning["ema20"] = round(ema20[-1], 6)
-        reasoning["current_vs_ema20"] = round(current - ema20[-1], 6)
-    if ema50:
-        reasoning["ema50"] = round(ema50[-1], 6)
-    if atr:
-        reasoning["atr"] = round(atr, 6)
-    # best-effort simple breakout_pct using recent highs
+    ema9 = _ema(closes, 9)
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    ema200 = _ema(closes, 200)
+
+    ema9_last = ema9[-1] if ema9 else None
+    ema20_last = ema20[-1] if ema20 else None
+    ema50_last = ema50[-1] if ema50 else None
+    ema200_last = ema200[-1] if ema200 else None
+    ema20_past = ema20[-5] if len(ema20) >= 5 else (ema20[0] if ema20 else None)
+
+    volume_ratio = 1.0
     try:
-        highs = _highs(primary)
-        recent_high = max(highs[-20:-1]) if len(highs) >= 3 else highs[-1]
-        reasoning["breakout_pct"] = round((current / max(recent_high, 1.0) - 1) * 100, 3)
+        vols = [float(x.get("volume", 0) or 0) for x in primary[-20:]]
+        if len(vols) >= 2:
+            prev = max(sum(vols[:-1]) / max(len(vols) - 1, 1), 1.0)
+            volume_ratio = vols[-1] / prev if vols[-1] > 0 else 1.0
     except Exception:
-        pass
+        volume_ratio = 1.0
 
-    class _FakeSig:
-        pass
+    higher_highs = len(highs) >= 4 and highs[-4] < highs[-3] < highs[-2] < highs[-1]
+    higher_lows = len(lows) >= 4 and lows[-4] < lows[-3] < lows[-2] < lows[-1]
+    higher_closes = len(closes) >= 4 and closes[-4] < closes[-3] < closes[-2] < closes[-1]
+    three_ascending = len(closes) >= 3 and closes[-3] < closes[-2] < closes[-1]
 
-    s = _FakeSig()
-    s.reasoning = reasoning
-    s.regime = regime
-    s.entry_price = current
-    s.initial_stop = (min(_lows(primary)[-6:-1]) - atr * 0.3) if len(primary) >= 6 else current - atr * 0.5
-    s.profit_target_1 = current + atr * 1.5
-    return compute_features_for_signal(strategy_key, s)
-    return ema_series[ema_idx]
+    recent_high_20 = max(highs[-20:]) if len(highs) >= 20 else max(highs)
+    recent_low_20 = min(lows[-20:]) if len(lows) >= 20 else min(lows)
 
+    trigger_type = "continuation"
+    if strategy_key == "pullback_reclaim":
+        trigger_type = "reclaim"
+    elif strategy_key == "mean_reversion_bounce":
+        trigger_type = "mean_reversion"
+    elif strategy_key == "range_breakout":
+        trigger_type = "breakout"
+
+    dip_below_ema = False
+    reclaim_confirmed = False
+    price_in_retest_band = False
+    bounce_confirmed = False
+
+    if ema20_last is not None:
+        window_start = max(0, len(primary) - 7)
+        for idx in range(window_start, len(primary) - 1):
+            ema_at_idx = _ema_value_at(ema20, 20, idx) if ema20 else None
+            if ema_at_idx is None:
+                continue
+            if closes[idx] < ema_at_idx or lows[idx] < ema_at_idx:
+                dip_below_ema = True
+        reclaim_confirmed = dip_below_ema and current > ema20_last
+        price_in_retest_band = abs(current - ema20_last) / max(abs(current), 1.0) <= 0.02
+
+    if strategy_key == "mean_reversion_bounce":
+        bounce_confirmed = len(closes) >= 2 and closes[-1] > closes[-2]
+
+    breakout_pct = 0.0
+    if recent_high_20:
+        breakout_pct = (current / max(recent_high_20, 1e-6) - 1.0) * 100.0
+
+    fallback_stop = (min(lows[-6:]) - atr * 0.25) if atr else min(lows[-6:])
+    fallback_tp1 = (current + atr * 1.5) if atr else current * 1.02
+
+    return StockEntrySignal(
+        strategy=strategy_name,
+        symbol=symbol,
+        entry_price=current,
+        initial_stop=fallback_stop,
+        profit_target_1=fallback_tp1,
+        profit_target_2=(current + atr * 3.0) if atr else current * 1.04,
+        regime=regime,
+        confidence=0.0,
+        max_hold_hours=8,
+        notes="synthetic scoring snapshot",
+        reasoning={
+            "signal_schema_version": "v2",
+            "strategy_key": strategy_key,
+            "timeframe": f"{tf_minutes}m",
+            "close": round(current, 6),
+            "atr": round(atr, 6),
+            "ema9": round(ema9_last, 6) if ema9_last is not None else None,
+            "ema20": round(ema20_last, 6) if ema20_last is not None else None,
+            "ema50": round(ema50_last, 6) if ema50_last is not None else None,
+            "ema200": round(ema200_last, 6) if ema200_last is not None else None,
+            "ema20_past": round(ema20_past, 6) if ema20_past is not None else None,
+            "ema20_history": [round(x, 6) for x in ema20[-5:]] if len(ema20) >= 5 else [],
+            "current_vs_ema20": round(current - ema20_last, 6) if ema20_last is not None else 0.0,
+            "breakout_pct": round(breakout_pct, 6),
+            "volume_ratio": round(volume_ratio, 6),
+            "higher_highs_confirmed": higher_highs,
+            "higher_lows_confirmed": higher_lows,
+            "higher_closes_confirmed": higher_closes,
+            "three_ascending_closes": three_ascending,
+            "dip_below_ema_confirmed": dip_below_ema,
+            "reclaim_confirmed": reclaim_confirmed,
+            "price_in_retest_band": price_in_retest_band,
+            "bounce_confirmed": bounce_confirmed,
+            "trigger_type": trigger_type,
+            "recent_high_20": round(recent_high_20, 6),
+            "recent_low_20": round(recent_low_20, 6),
+            "fallback_stop": round(fallback_stop, 6),
+            "fallback_tp1": round(fallback_tp1, 6),
+        },
+    )
+
+
+def _merge_signal_with_snapshot(signal: StockEntrySignal | None, snapshot: StockEntrySignal) -> StockEntrySignal:
+    if signal is None:
+        return snapshot
+    merged_reasoning = dict(snapshot.reasoning or {})
+    merged_reasoning.update(signal.reasoning or {})
+    signal.reasoning = merged_reasoning
+    if not getattr(signal, "regime", None):
+        signal.regime = snapshot.regime
+    return signal
+
+
+def _extract_candle_features_from_primary(strategy_key: str, strategy_name: str, symbol: str, primary: list[dict], tf_minutes: int):
+    snapshot = _build_signal_snapshot(strategy_name, strategy_key, symbol, primary, tf_minutes)
+    return compute_features_for_signal(strategy_key, snapshot, asset_class="stock")
 
 def _parse_bar_time(value: str) -> Optional[datetime]:
     if not value:
@@ -576,7 +652,7 @@ STRONG_SIGNAL_THRESHOLD = 0.60
 
 
 def _strategy_name_to_key(name: str) -> str | None:
-    if "Pullback Reclaim" in name:
+    if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
         return "pullback_reclaim"
     if "Trend Continuation" in name or "Momentum Breakout Continuation" in name:
         return "trend_continuation"
@@ -586,6 +662,45 @@ def _strategy_name_to_key(name: str) -> str | None:
         return "range_breakout"
     return None
 
+
+
+def _strategy_specific_bonus(strategy_key: str, signal: StockEntrySignal) -> float:
+    reasoning = signal.reasoning or {}
+    bonus = 0.0
+
+    if strategy_key == "pullback_reclaim":
+        if reasoning.get("dip_below_ema_confirmed"):
+            bonus += 0.08
+        if reasoning.get("reclaim_confirmed"):
+            bonus += 0.04
+
+    elif strategy_key == "range_breakout":
+        breakout_pct = float(reasoning.get("breakout_pct") or 0.0)
+
+        # Make true breakout charts outrank plain trend continuation charts.
+        # The current tests show trend_continuation still winning when the last
+        # bar is clearly a breakout candle, so give breakout setups a stronger
+        # strategy-specific reward.
+        if breakout_pct >= 5.0:
+            bonus += 0.22
+        elif breakout_pct >= 2.0:
+            bonus += 0.16
+        elif breakout_pct > 0.2:
+            bonus += 0.10
+
+    elif strategy_key == "mean_reversion_bounce":
+        if reasoning.get("bounce_confirmed"):
+            bonus += 0.10
+        if signal.regime == "ranging":
+            bonus += 0.05
+
+    elif strategy_key == "trend_continuation":
+        if reasoning.get("higher_closes_confirmed"):
+            bonus += 0.05
+        if reasoning.get("higher_highs_confirmed") and reasoning.get("higher_lows_confirmed"):
+            bonus += 0.05
+
+    return round(bonus, 6)
 
 def evaluate_all(
     symbol: str,
@@ -609,88 +724,118 @@ def evaluate_all(
     else:
         candles_by_tf = candles
 
-    # Candidate extraction using continuous scoring rather than boolean evaluate()
-    signals = []
+    tf_minutes_map = {"1m": 1, "5m": 5, "15m": 15, "1H": 60, "4H": 240, "daily": 1440}
+
+    signals: list[StockEntrySignal] = []
+    strategy_summaries: dict[str, dict] = {}
+
     for strategy in STOCK_ENTRY_STRATEGIES:
         primary = candles_by_tf.get(strategy.primary_tf, [])
         if len(primary) < 20:
             continue
+
         try:
-            key = _strategy_name_to_key(strategy.name) or ""
-            feature_scores = _extract_candle_features_from_primary(key, primary)
+            key = _strategy_name_to_key(strategy.name) or "range_breakout"
+            tf_minutes = tf_minutes_map.get(strategy.primary_tf, 15)
+
+            snapshot = _build_signal_snapshot(strategy.name, key, symbol, primary, tf_minutes)
+            feature_scores = _extract_candle_features_from_primary(
+                key,
+                strategy.name,
+                symbol,
+                primary,
+                tf_minutes,
+            )
             base_score = score_strategy_from_candles(key, feature_scores)
-            if base_score >= MIN_SCORE_THRESHOLD:
-                # Build a simplified signal record compatible with downstream code
-                try:
-                    sig_obj = strategy.evaluate(symbol, primary)
-                except Exception:
-                    sig_obj = None
-                candidate = StockEntrySignal(
-                    strategy=strategy.name,
-                    symbol=symbol,
-                    entry_price=getattr(sig_obj, "entry_price", 0.0) if sig_obj else feature_scores.get("entry_price", 0.0),
-                    initial_stop=getattr(sig_obj, "initial_stop", 0.0) if sig_obj else 0.0,
-                    profit_target_1=getattr(sig_obj, "profit_target_1", 0.0) if sig_obj else 0.0,
-                    profit_target_2=getattr(sig_obj, "profit_target_2", 0.0) if sig_obj else 0.0,
-                    regime=getattr(sig_obj, "regime", None) if sig_obj else None,
-                    confidence=max(getattr(sig_obj, "confidence", 0.0) if sig_obj else 0.0, base_score),
-                    max_hold_hours=getattr(sig_obj, "max_hold_hours", 8) if sig_obj else 8,
-                    notes=getattr(sig_obj, "notes", "") if sig_obj else "",
-                    reasoning=getattr(sig_obj, "reasoning", {}) if sig_obj else {},
-                )
+
+            raw_signal = None
+            try:
+                raw_signal = strategy.evaluate(symbol, primary)
+            except Exception:
+                raw_signal = None
+
+            candidate = _merge_signal_with_snapshot(raw_signal, snapshot)
+            candidate.confidence = max(
+                getattr(candidate, "confidence", 0.0) or 0.0,
+                round(base_score, 6),
+            )
+
+            strategy_summaries[strategy.name] = {
+                "key": key,
+                "signal": candidate,
+                "feature_scores": feature_scores,
+                "base_score": round(base_score, 6),
+                "raw_signal_present": raw_signal is not None,
+            }
+
+            if round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6):
                 signals.append(candidate)
+
         except Exception as exc:
             logger.error("Stock strategy %s error for %s: %s", strategy.name, symbol, exc)
+
     signals.sort(key=lambda s: s.confidence, reverse=True)
 
-    # Build evaluated strategies map for required supported keys
     key_map = {
-        "pullback_reclaim": ["Pullback Reclaim"],
+        "pullback_reclaim": ["Pullback Reclaim", "Failed Breakdown Reclaim"],
         "trend_continuation": ["Trend Continuation", "Trend Continuation Ladder", "Momentum Breakout Continuation"],
         "mean_reversion_bounce": ["Mean Reversion Bounce"],
         "range_breakout": ["Opening Range Breakout", "Breakout Retest Hold", "Volatility Compression Breakout", "Range Rotation Reversal"],
     }
 
     evaluated: dict[str, dict] = {}
-    rejected: dict[str, str] = {}
 
     for key, name_patterns in key_map.items():
-        matched = None
-        for s in signals:
-            for pat in name_patterns:
-                if pat in s.strategy:
-                    if matched is None or s.confidence > matched.confidence:
-                        matched = s
-        if matched:
-            # Compute feature-based scores from the actual signal reasoning
-            feature_scores = compute_features_for_signal(key, matched, asset_class="stock")
-            base_score = compute_strategy_score(key, feature_scores, regime=matched.regime if hasattr(matched, "regime") else None, asset_class="stock")
-            bias = compute_hint_bias(ai_hint, key) if ai_hint else 0.0
-            # Only apply bias to already-valid signals (do not rescue invalid setups)
-            final_score = base_score + bias
-            if final_score > 1.0:
-                final_score = 1.0
+        best = None
+        for pat in name_patterns:
+            summary = strategy_summaries.get(pat)
+            if not summary:
+                continue
+            if best is None or summary["base_score"] > best["base_score"]:
+                best = summary
+
+        if best:
+            matched = best["signal"]
+            feature_scores = best["feature_scores"]
+
+            base_score = compute_strategy_score(
+                key,
+                feature_scores,
+                regime=getattr(matched, "regime", None),
+                asset_class="stock",
+            )
+            base_score = min(1.0, base_score + _strategy_specific_bonus(key, matched))
+
+            # AI hint bias must never rescue a structurally invalid setup.
+            # Keep scores visible for diagnostics, but only allow bias when the
+            # real strategy produced a concrete signal and the regime fit is not weak.
+            regime_fit = float(feature_scores.get("regime_fit", 0.0) or 0.0)
+            raw_signal_present = bool(best.get("raw_signal_present"))
+            bias_allowed = raw_signal_present and regime_fit >= 0.5
+
+            bias = compute_hint_bias(ai_hint, key) if (ai_hint and bias_allowed) else 0.0
+            final_score = min(1.0, base_score + bias)
+
             evaluated[key] = {
                 "valid": True,
                 "base_score": round(base_score, 6),
                 "bias": round(bias, 6),
                 "final_score": round(final_score, 6),
                 "reason": None,
-                "feature_scores": {k: round(v, 6) for k, v in feature_scores.items()},
+                "feature_scores": {k2: round(v2, 6) for k2, v2 in feature_scores.items() if k2 != "_diagnostics"},
+                "bias_allowed": bias_allowed,
             }
         else:
-            # Differentiate reasons: if we had no candidate signals at all,
-            # report that; otherwise indicate no matching signal for this key.
-            reason = "no candidate signals" if not signals else "no matching signal"
             evaluated[key] = {
                 "valid": False,
                 "base_score": 0.0,
                 "bias": 0.0,
                 "final_score": 0.0,
-                "reason": reason,
+                "reason": "insufficient_candles",
+                "feature_scores": {},
+                "bias_allowed": False,
             }
 
-    # Select best valid strategy deterministically
     best_key = None
     for k, v in evaluated.items():
         if not v["valid"]:
@@ -702,15 +847,19 @@ def evaluate_all(
 
     ai_strat = ai_hint.get("suggested_strategy") if ai_hint else None
     ai_conf = float(ai_hint.get("confidence")) if ai_hint and ai_hint.get("confidence") is not None else None
+
     ai_agreement = None
     bias_applied = False
     bias_amount = 0.0
     selected_score = 0.0
+
     if best_key:
         selected_score = evaluated[best_key]["final_score"]
         ai_agreement = (ai_strat == best_key) if ai_strat else None
-        bias_applied = evaluated[best_key]["bias"] > 0.0
-        bias_amount = evaluated[best_key]["bias"]
+
+    if ai_strat and ai_strat in evaluated:
+        bias_applied = evaluated[ai_strat]["bias"] > 0.0
+        bias_amount = evaluated[ai_strat]["bias"]
 
     decision = BotDecision(
         selected_strategy=best_key,
@@ -723,30 +872,6 @@ def evaluate_all(
         ai_hint_bias_amount=bias_amount,
         feature_scores={k: v.get("feature_scores") for k, v in evaluated.items()},
     )
-
-    # Emit structured audit event via logs (and root logger for tests)
-    # Debug info: candidate count, raw evaluated map, and selected strategy
-    try:
-        logger.debug("BOT_STRATEGY_DECISION debug | %s | candidate_signals=%d", symbol, len(signals))
-        logger.debug("BOT_STRATEGY_DECISION debug | %s | evaluated_raw=%s", symbol, json.dumps(evaluated))
-        logger.debug("BOT_STRATEGY_DECISION debug | %s | selected_strategy=%s", symbol, decision.selected_strategy)
-    except Exception:
-        # keep audit emission robust even if debugging serialization fails
-        pass
-    # Additional candle frame debug when available via payload_meta.store
-    try:
-        if payload_meta and payload_meta.get("store"):
-            store = payload_meta.get("store")
-            tf_info = {}
-            for tf in ("1m", "5m", "15m", "1H", "4H", "daily"):
-                try:
-                    iv = {"1m":1, "5m":5, "15m":15, "1H":60, "4H":240, "daily":1440}[tf]
-                    tf_info[tf] = store.frame_info(symbol, iv)
-                except Exception:
-                    tf_info[tf] = {"error": "frame_info failed"}
-            logger.debug("BOT_STRATEGY_DECISION debug | %s | candle_frames=%s", symbol, json.dumps(tf_info))
-    except Exception:
-        pass
 
     audit_payload = {
         "schema_version": payload_meta.get("schema_version") if payload_meta else None,
@@ -761,19 +886,25 @@ def evaluate_all(
         "ai_hint_agreement": decision.ai_hint_agreement,
         "ai_hint_bias_applied": decision.ai_hint_bias_applied,
         "ai_hint_bias_amount": decision.ai_hint_bias_amount,
-        # Preserve backward-compatible final-score map
         "evaluated_strategy_scores": decision.evaluated_strategies,
-        # Provide full evaluated strategy map with detailed per-strategy fields
-        "evaluated_strategies": evaluated,
+        "evaluated_strategies": {
+            k: {
+                "valid": v["valid"],
+                "base_score": v["base_score"],
+                "bias": v["bias"],
+                "final_score": v["final_score"],
+                "reason": v["reason"],
+                "feature_scores": v["feature_scores"],
+            }
+            for k, v in evaluated.items()
+        },
         "rejected_strategies": {k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
         "feature_scores": {k: v.get("feature_scores") for k, v in evaluated.items()},
         "timestamp_received": payload_meta.get("timestamp") if payload_meta else None,
         "timestamp_evaluated": datetime.now(timezone.utc).isoformat(),
     }
-    # Single emission through module logger to avoid duplicate audit lines
     logger.info("[AUDIT] BOT_STRATEGY_DECISION | %s | %s", symbol, json.dumps(audit_payload))
 
-    # Persist BotStrategyDecision row asynchronously if DB available
     async def _persist_decision():
         try:
             async with AsyncSessionLocal() as db:
@@ -798,9 +929,7 @@ def evaluate_all(
                     evaluated_strategy_scores=decision.evaluated_strategies,
                     rejected_strategies={k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
                     feature_scores=decision.feature_scores or {},
-                    decision_context={
-                        "payload_meta": payload_meta,
-                    },
+                    decision_context={"payload_meta": payload_meta},
                 )
                 db.add(row)
                 await db.commit()
@@ -808,16 +937,11 @@ def evaluate_all(
             logger.exception("Failed to persist BotStrategyDecision for %s", symbol)
 
     try:
-        import asyncio
-
-        asyncio.create_task(_persist_decision())
+        loop = asyncio.get_running_loop()
+        loop.create_task(_persist_decision())
+    except RuntimeError:
+        logger.debug("Skipping BotStrategyDecision persistence for %s outside a running event loop", symbol)
     except Exception:
-        # If event loop not running (tests), run synchronously
-        import asyncio
-
-        try:
-            asyncio.run(_persist_decision())
-        except Exception:
-            logger.exception("Failed to persist BotStrategyDecision synchronously for %s", symbol)
+        logger.exception("Failed to schedule BotStrategyDecision persistence for %s", symbol)
 
     return signals

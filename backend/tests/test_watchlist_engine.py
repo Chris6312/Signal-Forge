@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -102,5 +103,4 @@ def test_process_update_v4_validation_and_ai_hint(monkeypatch):
     result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=meta))
     # One valid (BTC/USD) added, one invalid skipped
     assert result['total'] == 1
-    assert result['total'] == 0
 

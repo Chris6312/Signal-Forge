@@ -98,6 +98,8 @@ class FixedRiskDynamicFloor:
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv, atr_multiplier=1.5)
         if tp1_decision:
+            if tp1_decision.should_exit and tp1_decision.reason.startswith("Trail stop hit"):
+                tp1_decision.reason = tp1_decision.reason.replace("Trail stop hit", "Trailing floor hit", 1)
             return tp1_decision
 
         return ExitDecision(False, "Holding")

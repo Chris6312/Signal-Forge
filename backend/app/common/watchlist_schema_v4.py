@@ -241,124 +241,165 @@ def _regime_fit_from_regime_and_strategy(regime: Optional[str], strategy_key: st
 
 
 def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "stock") -> dict:
-    """Return a mapping of normalized component scores (0..1) for the given signal.
+    """Return normalized component scores for a strategy signal.
 
-    `signal` is the strategy signal object produced by entry strategies and is
-    expected to expose `.reasoning` dict, `.regime`, and pricing fields.
+    Expected signal schema:
+      - strategy: human-readable strategy name
+      - symbol: symbol string
+      - entry_price: latest close / trigger price
+      - initial_stop: stop price
+      - profit_target_1: first target
+      - regime: market regime string
+      - reasoning: dict with optional fields such as:
+          close, atr, ema9, ema20, ema50, ema200,
+          ema20_past, ema20_history, breakout_pct, volume_ratio,
+          higher_highs_confirmed, higher_lows_confirmed, higher_closes_confirmed,
+          dip_below_ema_confirmed, reclaim_confirmed, price_in_retest_band,
+          three_ascending_closes, trigger_type, setup_quality, timeframe.
     """
     reasoning = getattr(signal, "reasoning", {}) or {}
     regime = getattr(signal, "regime", None)
 
-    # Derive close price to normalize where available
-    close = None
-    try:
-        close = float(getattr(signal, "entry_price", None) or reasoning.get("close") or reasoning.get("entry_price") or 0.0)
-        if close == 0.0:
-            close = None
-    except Exception:
-        close = None
+    def _float(value, default=None):
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except Exception:
+            return default
 
-    # Read common EMA / ATR values from reasoning if present
-    ema9 = reasoning.get("ema9")
-    ema20 = reasoning.get("ema20")
-    ema50 = reasoning.get("ema50")
-    ema200 = reasoning.get("ema200")
-    atr = reasoning.get("atr")
+    close = _float(getattr(signal, "entry_price", None), None)
+    if close in (None, 0.0):
+        close = _float(reasoning.get("close") or reasoning.get("entry_price"), None)
 
-    # trend_strength: normalized distance between EMA20 and EMA50 vs price
-    try:
-        if ema20 is not None and ema50 is not None and close:
-            trend_strength = abs(float(ema20) - float(ema50)) / float(close)
-        else:
-            trend_strength = 0.0
-    except Exception:
-        trend_strength = 0.0
+    ema9 = _float(reasoning.get("ema9"), None)
+    ema20 = _float(reasoning.get("ema20"), None)
+    ema50 = _float(reasoning.get("ema50"), None)
+    ema200 = _float(reasoning.get("ema200"), None)
+    atr = _float(reasoning.get("atr"), None)
 
-    # momentum_alignment: price-normalized EMA20 slope over 5 periods
-    try:
-        # Prefer an explicit past ema value if present (e.g., ema20_past)
-        ema20_past = reasoning.get("ema20_past")
-        if ema20 is not None and ema20_past is not None and close:
-            momentum_alignment = (float(ema20) - float(ema20_past)) / float(close)
-        elif ema20 is not None and close and reasoning.get("ema20_history"):
-            hist = reasoning.get("ema20_history")
-            if isinstance(hist, (list, tuple)) and len(hist) >= 5:
-                momentum_alignment = (float(hist[-1]) - float(hist[-5])) / float(close)
-            else:
-                momentum_alignment = 0.0
-        elif ema20 is not None and close:
-            # best-effort: use current_vs_ema20 as proxy
-            current_vs_ema20 = float(reasoning.get("current_vs_ema20", 0.0))
-            momentum_alignment = current_vs_ema20 / float(close)
-        else:
-            momentum_alignment = 0.0
-    except Exception:
-        momentum_alignment = 0.0
+    stack_score = 0.0
+    stack_pairs = 0
+    for a, b, weight in ((ema9, ema20, 0.34), (ema20, ema50, 0.33), (ema50, ema200, 0.33)):
+        if a is None or b is None:
+            continue
+        stack_pairs += 1
+        if a > b:
+            stack_score += weight
 
-    # MA structure: graded stacking of EMA9>EMA20, EMA20>EMA50, EMA50>EMA200
-    ma_structure = 0.0
-    has_any = False
-    try:
-        if ema9 is not None and ema20 is not None:
-            has_any = True
-            if float(ema9) > float(ema20):
-                ma_structure += 0.33
-        if ema20 is not None and ema50 is not None:
-            has_any = True
-            if float(ema20) > float(ema50):
-                ma_structure += 0.33
-        if ema50 is not None and ema200 is not None:
-            has_any = True
-            if float(ema50) > float(ema200):
-                ma_structure += 0.34
-    except Exception:
-        ma_structure = 0.0
+    structure = stack_score if stack_pairs else _structure_score_from_reasoning(reasoning)
+    if reasoning.get("higher_highs_confirmed"):
+        structure += 0.12
+    if reasoning.get("higher_lows_confirmed"):
+        structure += 0.12
+    if reasoning.get("higher_closes_confirmed"):
+        structure += 0.08
+    if reasoning.get("three_ascending_closes"):
+        structure += 0.08
+    if reasoning.get("dip_below_ema_confirmed") or reasoning.get("reclaim_confirmed"):
+        structure += 0.05
+    structure = clamp01(structure)
 
-    if not has_any:
-        # fallback to previous structure heuristic
-        ma_structure = _structure_score_from_reasoning(reasoning)
+    trend_alignment = 0.0
+    if regime == "trending_up":
+        trend_alignment += 0.40
+    elif regime == "ranging":
+        trend_alignment += 0.15
+    elif regime == "unknown":
+        trend_alignment += 0.10
 
-    # volatility context: lower ATR relative to price -> higher score
-    try:
-        if atr is not None and close:
-            volatility_context = 1.0 - (float(atr) / float(close))
-        else:
-            volatility_context = 0.5
-    except Exception:
-        volatility_context = 0.5
+    if close is not None:
+        if ema20 is not None and close >= ema20:
+            trend_alignment += 0.25
+        if ema50 is not None and close >= ema50:
+            trend_alignment += 0.20
+        if ema200 is not None and close >= ema200:
+            trend_alignment += 0.15
+    if ema20 is not None and ema50 is not None and close:
+        trend_alignment += min(0.15, abs(ema20 - ema50) / max(abs(close), 1.0) * 8.0)
+    trend_alignment = clamp01(trend_alignment)
 
-    # price location relative to EMA20 normalized by ATR (helps reclaim vs continuation)
-    price_location = 0.0
-    try:
-        if ema20 is not None and atr is not None and atr != 0 and close is not None:
-            price_location = (float(close) - float(ema20)) / float(atr)
-            if price_location < -1.0:
-                price_location = -1.0
-            if price_location > 1.0:
-                price_location = 1.0
-        else:
-            price_location = 0.0
-    except Exception:
-        price_location = 0.0
+    momentum = 0.0
+    ema20_past = _float(reasoning.get("ema20_past"), None)
+    if ema20 is not None and ema20_past is not None and close:
+        momentum += clamp01(((ema20 - ema20_past) / max(abs(close), 1.0)) * 24.0)
+    elif reasoning.get("ema20_history") and close:
+        hist = reasoning.get("ema20_history")
+        if isinstance(hist, (list, tuple)) and len(hist) >= 5:
+            try:
+                momentum += clamp01(((float(hist[-1]) - float(hist[-5])) / max(abs(close), 1.0)) * 24.0)
+            except Exception:
+                pass
+    current_vs_ema20 = _float(reasoning.get("current_vs_ema20"), None)
+    if current_vs_ema20 is not None and close:
+        momentum += clamp01((current_vs_ema20 / max(abs(close), 1.0)) * 18.0)
+    breakout_pct = _float(reasoning.get("breakout_pct"), None)
+    if breakout_pct is not None:
+        momentum += clamp01(abs(breakout_pct) / 2.0) * 0.35
+    if reasoning.get("higher_closes_confirmed"):
+        momentum += 0.10
+    if reasoning.get("three_ascending_closes"):
+        momentum += 0.10
+    momentum = clamp01(momentum)
+
+    reclaim_or_breakout = 0.0
+    trigger_type = str(reasoning.get("trigger_type") or "").lower()
+    if trigger_type in {"breakout", "continuation"}:
+        reclaim_or_breakout += 0.35
+    if trigger_type in {"reclaim", "pullback", "failed_breakdown_reclaim"}:
+        reclaim_or_breakout += 0.35
+    if trigger_type in {"mean_reversion", "range_reversal"}:
+        reclaim_or_breakout += 0.25
+    if breakout_pct is not None:
+        reclaim_or_breakout += clamp01(abs(breakout_pct) / 1.5) * 0.35
+    if reasoning.get("dip_below_ema_confirmed"):
+        reclaim_or_breakout += 0.20
+    if reasoning.get("reclaim_confirmed"):
+        reclaim_or_breakout += 0.20
+    if reasoning.get("price_in_retest_band"):
+        reclaim_or_breakout += 0.15
+    if reasoning.get("bounce_confirmed"):
+        reclaim_or_breakout += 0.15
+    reclaim_or_breakout = clamp01(reclaim_or_breakout)
+
+    volume = 0.5
+    volume_ratio = _float(reasoning.get("volume_ratio"), None)
+    if volume_ratio is not None:
+        volume = clamp01((volume_ratio - 0.8) / 1.2)
+    elif reasoning.get("bars_in_session") and breakout_pct:
+        volume = 0.70
+    elif reasoning.get("volume_expansion"):
+        volume = clamp01(_float(reasoning.get("volume_expansion"), 0.5))
+
+    risk_reward = _risk_reward_from_signal(signal)
+    if risk_reward == 0.0 and atr and close:
+        fallback_stop = _float(reasoning.get("fallback_stop"), None)
+        fallback_tp = _float(reasoning.get("fallback_tp1"), None)
+        if fallback_stop is not None and fallback_tp is not None:
+            class _Tmp: pass
+            tmp = _Tmp()
+            tmp.entry_price = close
+            tmp.initial_stop = fallback_stop
+            tmp.profit_target_1 = fallback_tp
+            risk_reward = _risk_reward_from_signal(tmp)
 
     features = {
-        "structure": clamp01(ma_structure),
-        "trend_alignment": clamp01(trend_strength),
-        "momentum": clamp01(momentum_alignment),
-        "reclaim_or_breakout": clamp01(abs(float(reasoning.get("breakout_pct", 0.0))) / 10.0 if reasoning.get("breakout_pct") is not None else clamp01(abs(price_location))),
-        "volume": _volume_confirmation_from_reasoning(reasoning),
-        "risk_reward": _risk_reward_from_signal(signal),
+        "structure": structure,
+        "trend_alignment": trend_alignment,
+        "momentum": momentum,
+        "reclaim_or_breakout": reclaim_or_breakout,
+        "volume": clamp01(volume),
+        "risk_reward": clamp01(risk_reward),
         "regime_fit": _regime_fit_from_regime_and_strategy(regime, strategy_key),
-        # expose derived diagnostics for audits
         "_diagnostics": {
-            "price_location": round(price_location, 6),
-            "volatility_context": round(clamp01(volatility_context), 6),
+            "price_location": round(clamp01(((current_vs_ema20 or 0.0) / max(atr or 1.0, 1e-6)) * 0.5 + 0.5), 6) if atr else 0.5,
+            "volatility_context": round(clamp01(1.0 - ((atr or 0.0) / max(abs(close or 1.0), 1.0))), 6),
+            "signal_schema_version": reasoning.get("signal_schema_version", "v2"),
+            "trigger_type": trigger_type or None,
         },
     }
+    return {k: clamp01(v) if k != "_diagnostics" else v for k, v in features.items()}
 
-    # Ensure clamped
-    out = {k: clamp01(v) if k != "_diagnostics" else v for k, v in features.items()}
-    return out
 
 
 def score_strategy_from_candles(strategy: str, features: dict) -> float:
@@ -446,16 +487,28 @@ def compute_strategy_score(strategy_key: str, features: dict, regime: str | None
 
     features: dict of component scores in 0..1 matching WEIGHTS keys
     """
-    # Choose weight profile
     profile = WEIGHTS_BY_REGIME.get((regime or "NEUTRAL"), WEIGHTS)
 
-    # Weighted sum
     s = 0.0
     for k, w in profile.items():
         s += float(features.get(k, 0.0)) * float(w)
     s = max(0.0, min(1.0, s))
 
-    # Strategy-specific calibration ranges
+    # Penalize late / stalling trends so post-impulse chop does not
+    # score like a fresh continuation or breakout.
+    maturity_penalty = float(features.get("trend_maturity_penalty", 0.0) or 0.0)
+
+    if strategy_key == "trend_continuation":
+        s -= maturity_penalty * 0.35
+    elif strategy_key == "range_breakout":
+        s -= maturity_penalty * 0.28
+    elif strategy_key == "pullback_reclaim":
+        s -= maturity_penalty * 0.18
+    elif strategy_key == "mean_reversion_bounce":
+        s -= maturity_penalty * 0.10
+
+    s = max(0.0, min(1.0, s))
+
     CALIBRATION = {
         "trend_continuation": (0.1, 0.85),
         "pullback_reclaim": (0.05, 0.80),
@@ -466,12 +519,9 @@ def compute_strategy_score(strategy_key: str, features: dict, regime: str | None
     low, high = CALIBRATION.get(strategy_key, (0.0, 1.0))
     calibrated = low + s * (high - low)
 
-    # Asset-class-specific volatility scaling for crypto (gentler penalties)
     if asset_class == "crypto":
-        # gently boost moderate scores to account for higher baseline noise
         calibrated = calibrated * 0.95 + 0.05
 
-    # Ensure in 0..1 after calibration
     return max(0.0, min(1.0, calibrated))
 
 
