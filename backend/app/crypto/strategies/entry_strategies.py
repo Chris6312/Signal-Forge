@@ -63,6 +63,22 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
     elif strategy_key == "range_breakout":
         trigger_type = "breakout"
 
+    dip_below_ema_confirmed = bool(
+        ema20 and len(closes) >= 6 and any(
+            closes[i] < _ema_value_at(ema20, 20, i)
+            for i in range(max(1, len(closes) - 6), len(closes) - 1)
+            if _ema_value_at(ema20, 20, i) is not None
+        )
+    )
+    reclaim_confirmed = bool(
+        ema20
+        and dip_below_ema_confirmed
+        and current > ema20[-1]
+        and len(closes) >= 2
+        and closes[-1] > closes[-2]
+        and ((current - ema20[-1]) >= max(atr * 0.10, current * 0.001) if atr > 0 else True)
+    )
+
     reasoning = {
         "signal_schema_version": "v2",
         "strategy_key": strategy_key,
@@ -82,8 +98,8 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         "higher_lows_confirmed": bool(len(lows) >= 4 and lows[-4] < lows[-3] < lows[-2] < lows[-1]),
         "higher_closes_confirmed": bool(len(closes) >= 4 and closes[-4] < closes[-3] < closes[-2] < closes[-1]),
         "three_ascending_closes": bool(len(closes) >= 3 and closes[-3] < closes[-2] < closes[-1]),
-        "dip_below_ema_confirmed": bool(ema20 and len(closes) >= 6 and any(closes[i] < _ema_value_at(ema20, 20, i) for i in range(max(1, len(closes)-6), len(closes)-1) if _ema_value_at(ema20, 20, i) is not None)),
-        "reclaim_confirmed": bool(ema20 and current > ema20[-1]),
+        "dip_below_ema_confirmed": dip_below_ema_confirmed,
+        "reclaim_confirmed": reclaim_confirmed,
         "price_in_retest_band": bool(recent_high and abs(current - recent_high) / max(abs(recent_high), 1.0) <= 0.015),
         "bounce_confirmed": bool(len(closes) >= 2 and closes[-1] > closes[-2]),
         "trigger_type": trigger_type,
@@ -568,6 +584,7 @@ def evaluate_all(symbol, candles_by_tf):
                 "feature_scores": feature_scores,
                 "base_score": round(base_score, 6),
                 "passes_threshold": round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
+                "raw_signal_present": sig is not None,
             }
 
             if strategy_summaries[strat.name]["passes_threshold"]:
@@ -591,18 +608,24 @@ def evaluate_all(symbol, candles_by_tf):
             summary = strategy_summaries.get(pattern)
             if not summary:
                 continue
-            if best is None or summary["base_score"] > best["base_score"]:
+            if best is None:
+                best = summary
+                continue
+            summary_rank = (1 if summary.get("raw_signal_present") else 0, summary["base_score"])
+            best_rank = (1 if best.get("raw_signal_present") else 0, best["base_score"])
+            if summary_rank > best_rank:
                 best = summary
         if best:
             signal = best["signal"]
             feature_scores = best["feature_scores"]
+            raw_signal_present = bool(best.get("raw_signal_present"))
             base_score = compute_strategy_score(key, feature_scores, regime=getattr(signal, "regime", None), asset_class="crypto")
             evaluated[key] = {
-                "valid": True,
+                "valid": raw_signal_present,
                 "base_score": round(base_score, 6),
                 "bias": 0.0,
                 "final_score": round(base_score, 6),
-                "reason": None,
+                "reason": None if raw_signal_present else "no_live_signal",
                 "feature_scores": {k: round(v, 6) for k, v in feature_scores.items() if k != "_diagnostics"},
             }
         else:

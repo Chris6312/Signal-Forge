@@ -334,12 +334,17 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
     if current_vs_ema20 is not None and close:
         momentum += clamp01((current_vs_ema20 / max(abs(close), 1.0)) * 18.0)
     breakout_pct = _float(reasoning.get("breakout_pct"), None)
+    breakout_up_pct = max(0.0, breakout_pct or 0.0)
+    breakout_down_pct = max(0.0, -(breakout_pct or 0.0))
     if breakout_pct is not None:
-        momentum += clamp01(abs(breakout_pct) / 2.0) * 0.35
+        momentum += clamp01(breakout_up_pct / 2.0) * 0.35
+        momentum -= clamp01(breakout_down_pct / 2.0) * 0.20
     if reasoning.get("higher_closes_confirmed"):
         momentum += 0.10
     if reasoning.get("three_ascending_closes"):
         momentum += 0.10
+    if breakout_down_pct > 0 and not reasoning.get("higher_closes_confirmed"):
+        momentum -= 0.08
     momentum = clamp01(momentum)
 
     reclaim_or_breakout = 0.0
@@ -351,7 +356,8 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
     if trigger_type in {"mean_reversion", "range_reversal"}:
         reclaim_or_breakout += 0.25
     if breakout_pct is not None:
-        reclaim_or_breakout += clamp01(abs(breakout_pct) / 1.5) * 0.35
+        reclaim_or_breakout += clamp01(breakout_up_pct / 1.5) * 0.35
+        reclaim_or_breakout -= clamp01(breakout_down_pct / 1.5) * 0.15
     if reasoning.get("dip_below_ema_confirmed"):
         reclaim_or_breakout += 0.20
     if reasoning.get("reclaim_confirmed"):
@@ -360,6 +366,8 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
         reclaim_or_breakout += 0.15
     if reasoning.get("bounce_confirmed"):
         reclaim_or_breakout += 0.15
+    if trigger_type in {"breakout", "continuation"} and breakout_up_pct <= 0.0:
+        reclaim_or_breakout -= 0.12
     reclaim_or_breakout = clamp01(reclaim_or_breakout)
 
     volume = 0.5
@@ -383,6 +391,23 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
             tmp.profit_target_1 = fallback_tp
             risk_reward = _risk_reward_from_signal(tmp)
 
+    extension_penalty = 0.0
+    if close is not None and ema20 is not None:
+        extension_penalty += clamp01(max(0.0, close - ema20) / max(abs(close), 1.0) * 10.0) * 0.40
+    if close is not None and ema50 is not None:
+        extension_penalty += clamp01(max(0.0, close - ema50) / max(abs(close), 1.0) * 6.0) * 0.20
+    stall_penalty = 0.0
+    if trigger_type in {"breakout", "continuation"} and breakout_up_pct < 0.2:
+        stall_penalty += 0.20
+    if not reasoning.get("higher_highs_confirmed") and not reasoning.get("higher_lows_confirmed"):
+        stall_penalty += 0.15
+    if breakout_down_pct > 0.0:
+        stall_penalty += clamp01(breakout_down_pct / 2.5) * 0.30
+    if current_vs_ema20 is not None and current_vs_ema20 < 0:
+        stall_penalty += clamp01(abs(current_vs_ema20) / max(abs(close or 1.0), 1.0) * 18.0) * 0.20
+
+    trend_maturity_penalty = clamp01(extension_penalty + stall_penalty)
+
     features = {
         "structure": structure,
         "trend_alignment": trend_alignment,
@@ -391,11 +416,15 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
         "volume": clamp01(volume),
         "risk_reward": clamp01(risk_reward),
         "regime_fit": _regime_fit_from_regime_and_strategy(regime, strategy_key),
+        "trend_maturity_penalty": trend_maturity_penalty,
         "_diagnostics": {
             "price_location": round(clamp01(((current_vs_ema20 or 0.0) / max(atr or 1.0, 1e-6)) * 0.5 + 0.5), 6) if atr else 0.5,
             "volatility_context": round(clamp01(1.0 - ((atr or 0.0) / max(abs(close or 1.0), 1.0))), 6),
             "signal_schema_version": reasoning.get("signal_schema_version", "v2"),
             "trigger_type": trigger_type or None,
+            "breakout_up_pct": round(breakout_up_pct, 6),
+            "breakout_down_pct": round(breakout_down_pct, 6),
+            "trend_maturity_penalty": round(trend_maturity_penalty, 6),
         },
     }
     return {k: clamp01(v) if k != "_diagnostics" else v for k, v in features.items()}
