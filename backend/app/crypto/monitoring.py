@@ -29,6 +29,14 @@ ASSET_CLASS = "crypto"
 COOLDOWN_KEY_PREFIX = "cooldown:crypto:"
 
 
+def _extract_signals(result):
+    if isinstance(result, dict):
+        return result.get("signals") or []
+    if isinstance(result, list):
+        return result
+    return []
+
+
 class CryptoMonitor:
     def __init__(self):
         self._store = CandleStore()
@@ -128,7 +136,8 @@ class CryptoMonitor:
             "daily": self._store.get(can, TF_MINUTES["daily"]),
         }
 
-        signals = evaluate_all(can, candles_by_tf)
+        eval_result = evaluate_all(can, candles_by_tf)
+        signals = _extract_signals(eval_result)
         if not signals:
             try:
                 # release intent if no signal

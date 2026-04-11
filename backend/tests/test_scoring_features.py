@@ -58,11 +58,12 @@ def test_pullback_reclaim_prefers_reclaim_chart(caplog):
     scores = payload["evaluated_strategy_scores"]
     pr = scores.get("pullback_reclaim", 0.0)
     tc = scores.get("trend_continuation", 0.0)
-    rb = scores.get("range_breakout", 0.0)
-    assert pr >= tc and pr >= rb
+    orb = scores.get("opening_range_breakout", 0.0)
+    vcb = scores.get("volatility_compression_breakout", 0.0)
+    assert pr >= tc and pr >= orb and pr >= vcb
 
 
-def test_range_breakout_prefers_breakout_chart(caplog):
+def test_opening_range_breakout_prefers_breakout_chart(caplog):
     caplog.set_level("INFO")
     base = trending_up_history(64, start=100.0, end=199.0)
     base.append(make_bar(215.0, spread=0.01))
@@ -70,8 +71,8 @@ def test_range_breakout_prefers_breakout_chart(caplog):
     payload = _extract_audit_from_caplog(caplog)
     assert payload is not None
     scores = payload["evaluated_strategy_scores"]
-    rb = scores.get("range_breakout", 0.0)
-    assert rb >= max(v for k, v in scores.items() if k != "range_breakout")
+    orb = scores.get("opening_range_breakout", 0.0)
+    assert orb >= max(v for k, v in scores.items() if k != "opening_range_breakout")
 
 
 def test_mean_reversion_bounce_prefers_stretch_reversal_chart(caplog):
@@ -181,3 +182,59 @@ def test_crypto_scores_are_not_flat_zero_with_trending_data(caplog):
     vals = list(payload["evaluated_strategy_scores"].values())
     assert any(v > 0.0 for v in vals)
     assert len(set(vals)) > 1
+
+
+def test_crypto_range_rotation_is_suppressed_in_strong_trend(caplog):
+    caplog.set_level("INFO")
+    evaluate_crypto("SOL/USD", trending_up_ohlcv(80))
+    payload = _extract_audit_from_caplog(caplog)
+    assert payload is not None
+    scores = payload["evaluated_strategy_scores"]
+    assert scores.get("range_rotation", 0.0) < scores.get("breakout_retest", 0.0)
+    assert scores.get("range_rotation", 0.0) < scores.get("trend_continuation", 0.0)
+
+
+def test_crypto_breakout_retest_requires_real_retest_context():
+    class S: pass
+    s = S()
+    s.entry_price = 105.0
+    s.initial_stop = 101.0
+    s.profit_target_1 = 111.0
+    s.regime = "trending_up"
+    s.reasoning = {
+        "signal_schema_version": "v2",
+        "ema9": 104.8,
+        "ema20": 104.0,
+        "ema50": 102.5,
+        "ema200": 98.0,
+        "ema20_past": 102.9,
+        "ema20_history": [102.8, 103.0, 103.3, 103.7, 104.0],
+        "current_vs_ema20": 1.0,
+        "breakout_pct": 1.8,
+        "volume_ratio": 1.4,
+        "higher_highs_confirmed": True,
+        "higher_lows_confirmed": True,
+        "higher_closes_confirmed": True,
+        "trigger_type": "breakout",
+        "atr": 1.2,
+        "prior_high_40": 103.5,
+        "breakout_high_10": 106.0,
+        "retest_low": 103.7,
+        "price_in_retest_band": True,
+        "raw_signal_present": True,
+    }
+    with_retest = compute_features_for_signal("breakout_retest", s, asset_class="crypto")
+    score_with_retest = compute_strategy_score("breakout_retest", with_retest, regime="trending_up", asset_class="crypto")
+
+    s2 = S()
+    s2.entry_price = s.entry_price
+    s2.initial_stop = s.initial_stop
+    s2.profit_target_1 = s.profit_target_1
+    s2.regime = s.regime
+    s2.reasoning = dict(s.reasoning)
+    s2.reasoning["retest_low"] = 100.0
+    s2.reasoning["price_in_retest_band"] = False
+    without_retest = compute_features_for_signal("breakout_retest", s2, asset_class="crypto")
+    score_without_retest = compute_strategy_score("breakout_retest", without_retest, regime="trending_up", asset_class="crypto")
+
+    assert score_with_retest > score_without_retest

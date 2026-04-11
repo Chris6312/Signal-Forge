@@ -128,12 +128,14 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
     recent_low_20 = min(lows[-20:]) if len(lows) >= 20 else min(lows)
 
     trigger_type = "continuation"
-    if strategy_key == "pullback_reclaim":
+    if strategy_key in {"pullback_reclaim", "failed_breakdown_reclaim"}:
         trigger_type = "reclaim"
     elif strategy_key == "mean_reversion_bounce":
         trigger_type = "mean_reversion"
-    elif strategy_key == "range_breakout":
+    elif strategy_key in {"opening_range_breakout", "volatility_compression_breakout", "breakout_retest"}:
         trigger_type = "breakout"
+    elif strategy_key == "range_rotation":
+        trigger_type = "range_reversal"
 
     dip_below_ema = False
     reclaim_confirmed = False
@@ -160,6 +162,36 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
 
     fallback_stop = (min(lows[-6:]) - atr * 0.25) if atr else min(lows[-6:])
     fallback_tp1 = (current + atr * 1.5) if atr else current * 1.02
+
+    extra_reasoning: dict[str, float | int | bool | None] = {}
+    if strategy_key == "opening_range_breakout":
+        session_bars = _latest_session_bars(primary)
+        if len(session_bars) >= 4:
+            opening_range = session_bars[:3]
+        else:
+            opening_range = primary[:3]
+        if opening_range:
+            opening_range_high = max(float(bar.get("high", 0) or 0) for bar in opening_range)
+            opening_range_low = min(float(bar.get("low", 0) or 0) for bar in opening_range)
+            extra_reasoning.update({
+                "opening_range_high": round(opening_range_high, 6),
+                "opening_range_low": round(opening_range_low, 6),
+                "bars_in_session": len(session_bars),
+            })
+    elif strategy_key == "volatility_compression_breakout":
+        recent_slice = primary[-10:]
+        prior_slice = primary[-30:-10]
+        if recent_slice and prior_slice:
+            recent_atr_5 = _atr_from_history(recent_slice, period=min(5, max(1, len(recent_slice) - 1)))
+            prior_atr_14 = _atr_from_history(prior_slice, period=min(14, max(1, len(prior_slice) - 1)))
+            compression_high = max(float(x.get("high", 0) or 0) for x in recent_slice)
+            compression_low = min(float(x.get("low", 0) or 0) for x in recent_slice)
+            extra_reasoning.update({
+                "recent_atr_5": round(recent_atr_5, 6),
+                "prior_atr_14": round(prior_atr_14, 6),
+                "compression_high": round(compression_high, 6),
+                "compression_low": round(compression_low, 6),
+            })
 
     return StockEntrySignal(
         strategy=strategy_name,
@@ -200,6 +232,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
             "recent_low_20": round(recent_low_20, 6),
             "fallback_stop": round(fallback_stop, 6),
             "fallback_tp1": round(fallback_tp1, 6),
+            **extra_reasoning,
         },
     )
 
@@ -652,14 +685,22 @@ STRONG_SIGNAL_THRESHOLD = 0.60
 
 
 def _strategy_name_to_key(name: str) -> str | None:
-    if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
+    if "Pullback Reclaim" in name:
         return "pullback_reclaim"
+    if "Failed Breakdown Reclaim" in name:
+        return "failed_breakdown_reclaim"
     if "Trend Continuation" in name or "Momentum Breakout Continuation" in name:
         return "trend_continuation"
     if "Mean Reversion Bounce" in name:
         return "mean_reversion_bounce"
-    if any(p in name for p in ("Opening Range Breakout", "Breakout Retest Hold", "Volatility Compression Breakout", "Range Rotation Reversal")):
-        return "range_breakout"
+    if "Opening Range Breakout" in name:
+        return "opening_range_breakout"
+    if "Volatility Compression Breakout" in name:
+        return "volatility_compression_breakout"
+    if "Breakout Retest Hold" in name:
+        return "breakout_retest"
+    if "Range Rotation Reversal" in name:
+        return "range_rotation"
     return None
 
 
@@ -674,24 +715,31 @@ def _strategy_specific_bonus(strategy_key: str, signal: StockEntrySignal) -> flo
         if reasoning.get("reclaim_confirmed"):
             bonus += 0.04
 
-    elif strategy_key == "range_breakout":
+    elif strategy_key in {"opening_range_breakout", "volatility_compression_breakout", "breakout_retest"}:
         breakout_pct = float(reasoning.get("breakout_pct") or 0.0)
         breakout_confirmed = bool(
             reasoning.get("higher_highs_confirmed")
             or reasoning.get("higher_closes_confirmed")
             or reasoning.get("price_in_retest_band")
         )
-
-        # Keep the breakout reward for true expansion / retest behavior, but
-        # stop handing it out to every chart that is merely a bit above recent
-        # highs after an aging impulse.
         if breakout_confirmed:
             if breakout_pct >= 5.0:
-                bonus += 0.20
+                bonus += 0.18
             elif breakout_pct >= 2.0:
-                bonus += 0.14
+                bonus += 0.12
             elif breakout_pct > 0.2:
-                bonus += 0.08
+                bonus += 0.06
+        if strategy_key == "volatility_compression_breakout":
+            recent_atr = float(reasoning.get("recent_atr_5") or 0.0)
+            prior_atr = float(reasoning.get("prior_atr_14") or 0.0)
+            if recent_atr > 0 and prior_atr > 0 and recent_atr < prior_atr * 0.60:
+                bonus += 0.06
+        if strategy_key == "opening_range_breakout" and reasoning.get("opening_range_high"):
+            bonus += 0.04
+
+    elif strategy_key == "failed_breakdown_reclaim":
+        if reasoning.get("reclaim_confirmed"):
+            bonus += 0.08
 
     elif strategy_key == "mean_reversion_bounce":
         if reasoning.get("bounce_confirmed"):
@@ -712,7 +760,8 @@ def evaluate_all(
     candles: "list[dict] | dict[str, list]",
     ai_hint: dict | None = None,
     payload_meta: dict | None = None,
-) -> list[StockEntrySignal]:
+    include_diagnostics: bool = False,
+) -> list[StockEntrySignal] | dict:
     """
     Evaluate all stock entry strategies.
 
@@ -740,18 +789,10 @@ def evaluate_all(
             continue
 
         try:
-            key = _strategy_name_to_key(strategy.name) or "range_breakout"
+            key = _strategy_name_to_key(strategy.name) or "opening_range_breakout"
             tf_minutes = tf_minutes_map.get(strategy.primary_tf, 15)
 
             snapshot = _build_signal_snapshot(strategy.name, key, symbol, primary, tf_minutes)
-            feature_scores = _extract_candle_features_from_primary(
-                key,
-                strategy.name,
-                symbol,
-                primary,
-                tf_minutes,
-            )
-            base_score = score_strategy_from_candles(key, feature_scores)
 
             raw_signal = None
             try:
@@ -760,6 +801,11 @@ def evaluate_all(
                 raw_signal = None
 
             candidate = _merge_signal_with_snapshot(raw_signal, snapshot)
+            candidate.reasoning = dict(getattr(candidate, "reasoning", {}) or {})
+            candidate.reasoning["raw_signal_present"] = raw_signal is not None
+
+            feature_scores = compute_features_for_signal(key, candidate, asset_class="stock")
+            base_score = score_strategy_from_candles(key, feature_scores)
             candidate.confidence = max(
                 getattr(candidate, "confidence", 0.0) or 0.0,
                 round(base_score, 6),
@@ -782,10 +828,12 @@ def evaluate_all(
     signals.sort(key=lambda s: s.confidence, reverse=True)
 
     key_map = {
-        "pullback_reclaim": ["Pullback Reclaim", "Failed Breakdown Reclaim"],
+        "pullback_reclaim": ["Pullback Reclaim"],
+        "failed_breakdown_reclaim": ["Failed Breakdown Reclaim"],
         "trend_continuation": ["Trend Continuation", "Trend Continuation Ladder", "Momentum Breakout Continuation"],
         "mean_reversion_bounce": ["Mean Reversion Bounce"],
-        "range_breakout": ["Opening Range Breakout", "Breakout Retest Hold", "Volatility Compression Breakout", "Range Rotation Reversal"],
+        "opening_range_breakout": ["Opening Range Breakout"],
+        "volatility_compression_breakout": ["Volatility Compression Breakout"],
     }
 
     evaluated: dict[str, dict] = {}
@@ -948,5 +996,25 @@ def evaluate_all(
         logger.debug("Skipping BotStrategyDecision persistence for %s outside a running event loop", symbol)
     except Exception:
         logger.exception("Failed to schedule BotStrategyDecision persistence for %s", symbol)
+
+    if include_diagnostics:
+        return {
+            "signals": signals,
+            "evaluated_strategy_scores": decision.evaluated_strategies,
+            "evaluated_strategies": {
+                k: {
+                    "valid": v["valid"],
+                    "base_score": v["base_score"],
+                    "bias": v["bias"],
+                    "final_score": v["final_score"],
+                    "reason": v["reason"],
+                    "feature_scores": v["feature_scores"],
+                }
+                for k, v in evaluated.items()
+            },
+            "rejected_strategies": {k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
+            "feature_scores": decision.feature_scores or {},
+            "timestamp_evaluated": audit_payload["timestamp_evaluated"],
+        }
 
     return signals

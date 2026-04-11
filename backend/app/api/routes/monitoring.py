@@ -1,21 +1,68 @@
 import asyncio
 import logging
+from collections.abc import Mapping, Sequence
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
 from app.api.schemas.monitoring import EvaluateSymbolOut, MonitoringListOut
-from app.common.models.watchlist import WatchlistSymbol, SymbolState
-from app.common.symbols import canonical_symbol
-from app.common.redis_client import get_redis
 from app.common.models.position import Position, PositionState
+from app.common.models.watchlist import SymbolState, WatchlistSymbol
+from app.common.redis_client import get_redis
+from app.common.symbols import canonical_symbol
 from app.regime import regime_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _normalize_eval_result(result) -> dict:
+    if isinstance(result, Mapping):
+        signals = result.get("signals", [])
+        if not isinstance(signals, list):
+            signals = []
+        return {
+            "signals": signals,
+            "evaluated_strategy_scores": dict(result.get("evaluated_strategy_scores", {}) or {}),
+            "evaluated_strategies": dict(result.get("evaluated_strategies", {}) or {}),
+            "rejected_strategies": dict(result.get("rejected_strategies", {}) or {}),
+            "feature_scores": dict(result.get("feature_scores", {}) or {}),
+            "timestamp_evaluated": result.get("timestamp_evaluated"),
+        }
+
+    if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
+        return {
+            "signals": list(result),
+            "evaluated_strategy_scores": {},
+            "evaluated_strategies": {},
+            "rejected_strategies": {},
+            "feature_scores": {},
+            "timestamp_evaluated": None,
+        }
+
+    return {
+        "signals": [],
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {},
+        "feature_scores": {},
+        "timestamp_evaluated": None,
+    }
+
+
+def _serialize_signal(signal) -> dict:
+    return {
+        "strategy": signal.strategy,
+        "entry_price": signal.entry_price,
+        "stop": signal.initial_stop,
+        "tp1": signal.profit_target_1,
+        "tp2": signal.profit_target_2,
+        "regime": signal.regime,
+        "confidence": signal.confidence,
+        "notes": signal.notes,
+    }
 
 
 @router.get("", response_model=MonitoringListOut)
@@ -34,35 +81,51 @@ async def get_monitoring_candidates(
             if ws.asset_class == "crypto":
                 from app.crypto.kraken_client import kraken_client
                 from app.crypto.strategies.entry_strategies import evaluate_all
+
                 can = canonical_symbol(ws.symbol, asset_class=ws.asset_class)
-                ohlcv_1h, ohlcv_4h = await asyncio.gather(
+                ohlcv_15m, ohlcv_1h, ohlcv_4h, ohlcv_daily = await asyncio.gather(
+                    kraken_client.get_ohlcv(can, interval=15),
                     kraken_client.get_ohlcv(can, interval=60),
                     kraken_client.get_ohlcv(can, interval=240),
+                    kraken_client.get_ohlcv(can, interval=1440),
                 )
-                candles_by_tf = {
-                    "15m": await kraken_client.get_ohlcv(can, interval=15),
-                    "1H":  ohlcv_1h,
-                    "4H":  ohlcv_4h,
-                    "daily": await kraken_client.get_ohlcv(can, interval=1440),
-                }
-                signals = evaluate_all(can, candles_by_tf)
+                raw_result = evaluate_all(
+                    can,
+                    {
+                        "15m": ohlcv_15m,
+                        "1H": ohlcv_1h,
+                        "4H": ohlcv_4h,
+                        "daily": ohlcv_daily,
+                    },
+                    include_diagnostics=True,
+                )
             elif ws.asset_class == "stock":
-                from app.stocks.tradier_client import tradier_client
                 from app.stocks.strategies.entry_strategies import evaluate_all
+                from app.stocks.tradier_client import tradier_client
+
                 tf5m, tf15m, daily = await asyncio.gather(
                     tradier_client.get_timesales(ws.symbol, interval="5min"),
                     tradier_client.get_timesales(ws.symbol, interval="15min"),
                     tradier_client.get_history(ws.symbol),
                 )
-                candles_by_tf = {
-                    "5m":    tf5m,
-                    "15m":   tf15m,
-                    "daily": daily,
-                }
-                signals = evaluate_all(ws.symbol, candles_by_tf)
+                raw_result = evaluate_all(
+                    ws.symbol,
+                    {
+                        "5m": tf5m,
+                        "15m": tf15m,
+                        "daily": daily,
+                    },
+                    include_diagnostics=True,
+                )
             else:
-                signals = []
-            return signals[0] if signals else None
+                raw_result = []
+
+            normalized = _normalize_eval_result(raw_result)
+            signals = normalized["signals"]
+            return {
+                "top_signal": signals[0] if signals else None,
+                "diagnostics": normalized,
+            }
         except Exception as exc:
             logger.warning("Top-signal evaluation failed for %s (%s): %s", ws.symbol, ws.asset_class, exc)
             return exc
@@ -73,7 +136,6 @@ async def get_monitoring_candidates(
     for ws, sig in zip(symbols, top_signals):
         display_symbol = canonical_symbol(ws.symbol, asset_class=ws.asset_class) if ws.asset_class == "crypto" else ws.symbol
 
-        # diagnostics defaults
         blocked_reason = None
         has_open_position = False
         cooldown_active = False
@@ -82,14 +144,12 @@ async def get_monitoring_candidates(
         top_notes = None
         position_or_order_status = None
 
-        # If _top_signal returned an exception, surface it as evaluation_error
         if isinstance(sig, Exception):
             evaluation_error = str(sig)
             sig_obj = None
         else:
-            sig_obj = sig
+            sig_obj = sig.get("top_signal") if isinstance(sig, dict) else None
 
-        # Check open positions
         try:
             stmt = select(Position).where(
                 Position.symbol == canonical_symbol(ws.symbol, asset_class=ws.asset_class) if ws.asset_class == "crypto" else ws.symbol,
@@ -101,7 +161,6 @@ async def get_monitoring_candidates(
         except Exception as exc:
             logger.debug("Open position check failed for %s: %s", ws.symbol, exc)
 
-        # Check cooldown key in redis
         try:
             redis = await get_redis()
             cooldown_key = f"cooldown:{ws.asset_class}:{canonical_symbol(ws.symbol, asset_class=ws.asset_class) if ws.asset_class == 'crypto' else ws.symbol}"
@@ -109,7 +168,6 @@ async def get_monitoring_candidates(
         except Exception as exc:
             logger.debug("Cooldown lookup failed for %s: %s", ws.symbol, exc)
 
-        # Regime allowance check: if we have a signal, ask regime engine
         try:
             if sig_obj:
                 try:
@@ -132,8 +190,7 @@ async def get_monitoring_candidates(
             pass
 
         if sig_obj:
-            top_notes = getattr(sig_obj, 'notes', None)
-            position_or_order_status = None
+            top_notes = getattr(sig_obj, "notes", None)
 
         candidates.append({
             "symbol": display_symbol,
@@ -159,54 +216,67 @@ async def get_monitoring_candidates(
 @router.get("/evaluate/{symbol:path}", response_model=EvaluateSymbolOut)
 async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
     can = canonical_symbol(symbol, asset_class=asset_class)
-    result: dict = {"symbol": can, "asset_class": asset_class, "signals": []}
+    result: dict = {
+        "symbol": can,
+        "asset_class": asset_class,
+        "signals": [],
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {},
+        "feature_scores": {},
+        "timestamp_evaluated": None,
+    }
 
     try:
         if asset_class == "crypto":
             from app.crypto.kraken_client import kraken_client
             from app.crypto.strategies.entry_strategies import evaluate_all
+
             ohlcv_15m, ohlcv_1h, ohlcv_4h, ohlcv_daily = await asyncio.gather(
                 kraken_client.get_ohlcv(can, interval=15),
                 kraken_client.get_ohlcv(can, interval=60),
                 kraken_client.get_ohlcv(can, interval=240),
                 kraken_client.get_ohlcv(can, interval=1440),
             )
-            candles_by_tf = {
-                "15m":   ohlcv_15m,
-                "1H":    ohlcv_1h,
-                "4H":    ohlcv_4h,
-                "daily": ohlcv_daily,
-            }
-            signals = evaluate_all(can, candles_by_tf)
-        elif asset_class == "stock":
-            from app.stocks.tradier_client import tradier_client
-            from app.stocks.strategies.entry_strategies import evaluate_all
-            tf5m, tf15m, daily = await asyncio.gather(
-                tradier_client.get_timesales(symbol.upper(), interval="5min"),
-                tradier_client.get_timesales(symbol.upper(), interval="15min"),
-                tradier_client.get_history(symbol.upper()),
+            raw_result = evaluate_all(
+                can,
+                {
+                    "15m": ohlcv_15m,
+                    "1H": ohlcv_1h,
+                    "4H": ohlcv_4h,
+                    "daily": ohlcv_daily,
+                },
+                include_diagnostics=True,
             )
-            candles_by_tf = {
-                "5m":    tf5m,
-                "15m":   tf15m,
-                "daily": daily,
-            }
-            signals = evaluate_all(symbol.upper(), candles_by_tf)
+        elif asset_class == "stock":
+            from app.stocks.strategies.entry_strategies import evaluate_all
+            from app.stocks.tradier_client import tradier_client
+
+            upper_symbol = symbol.upper()
+            tf5m, tf15m, daily = await asyncio.gather(
+                tradier_client.get_timesales(upper_symbol, interval="5min"),
+                tradier_client.get_timesales(upper_symbol, interval="15min"),
+                tradier_client.get_history(upper_symbol),
+            )
+            raw_result = evaluate_all(
+                upper_symbol,
+                {
+                    "5m": tf5m,
+                    "15m": tf15m,
+                    "daily": daily,
+                },
+                include_diagnostics=True,
+            )
         else:
-            signals = []
-        result["signals"] = [
-            {
-                "strategy": s.strategy,
-                "entry_price": s.entry_price,
-                "stop": s.initial_stop,
-                "tp1": s.profit_target_1,
-                "tp2": s.profit_target_2,
-                "regime": s.regime,
-                "confidence": s.confidence,
-                "notes": s.notes,
-            }
-            for s in signals
-        ]
+            raw_result = []
+
+        normalized = _normalize_eval_result(raw_result)
+        result["signals"] = [_serialize_signal(signal) for signal in normalized["signals"]]
+        result["evaluated_strategy_scores"] = normalized["evaluated_strategy_scores"]
+        result["evaluated_strategies"] = normalized["evaluated_strategies"]
+        result["rejected_strategies"] = normalized["rejected_strategies"]
+        result["feature_scores"] = normalized["feature_scores"]
+        result["timestamp_evaluated"] = normalized["timestamp_evaluated"]
     except Exception as exc:
         result["error"] = str(exc)
 

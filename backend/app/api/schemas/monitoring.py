@@ -41,4 +41,9 @@ class EvaluateSymbolOut(BaseModel):
     symbol: str
     asset_class: str
     signals: list[EntrySignalOut]
+    evaluated_strategy_scores: dict[str, float] = {}
+    evaluated_strategies: dict[str, dict] = {}
+    rejected_strategies: dict[str, str] = {}
+    feature_scores: dict[str, dict[str, float]] = {}
+    timestamp_evaluated: str | None = None
     error: str | None = None

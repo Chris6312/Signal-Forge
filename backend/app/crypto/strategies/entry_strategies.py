@@ -627,7 +627,7 @@ def _strategy_name_to_key(name: str) -> str | None:
     return None
 
 
-def evaluate_all(symbol, candles_by_tf):
+def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
     if isinstance(candles_by_tf, list):
         candles_by_tf = {
             "15m": candles_by_tf,
@@ -646,24 +646,30 @@ def evaluate_all(symbol, candles_by_tf):
             key = _strategy_name_to_key(strat.name) or "range_breakout"
             tf_minutes = 240 if strat.primary_tf == "4H" else 60
             snapshot = _build_signal_snapshot(strat.name, key, symbol, ohlcv, tf_minutes)
-            feature_scores = compute_features_for_signal(key, snapshot, asset_class="crypto")
-            base_score = score_strategy_from_candles(key, feature_scores)
-
-            logger.debug(
-                "CRYPTO_SCORE_DEBUG | %s | %s | feature_scores=%s | base_score_raw=%r | threshold_raw=%r | passes=%s",
-                symbol,
-                key,
-                json.dumps(feature_scores),
-                base_score,
-                MIN_SCORE_THRESHOLD,
-                round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
-            )
 
             try:
                 sig = strat.evaluate(symbol, ohlcv)
             except Exception:
                 sig = None
+
             candidate = _merge_signal_with_snapshot(sig, snapshot)
+            candidate.reasoning = dict(getattr(candidate, "reasoning", {}) or {})
+            candidate.reasoning["raw_signal_present"] = sig is not None
+
+            feature_scores = compute_features_for_signal(key, candidate, asset_class="crypto")
+            base_score = score_strategy_from_candles(key, feature_scores)
+
+            logger.debug(
+                "CRYPTO_SCORE_DEBUG | %s | %s | feature_scores=%s | base_score_raw=%r | threshold_raw=%r | raw_signal_present=%s | passes=%s",
+                symbol,
+                key,
+                json.dumps(feature_scores),
+                base_score,
+                MIN_SCORE_THRESHOLD,
+                sig is not None,
+                round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
+            )
+
             candidate.confidence = max(getattr(candidate, "confidence", 0.0) or 0.0, round(base_score, 6))
 
             strategy_summaries[strat.name] = {
@@ -672,6 +678,7 @@ def evaluate_all(symbol, candles_by_tf):
                 "feature_scores": feature_scores,
                 "base_score": round(base_score, 6),
                 "passes_threshold": round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
+                "raw_signal_present": sig is not None,
             }
 
             if strategy_summaries[strat.name]["passes_threshold"]:
@@ -711,6 +718,7 @@ def evaluate_all(symbol, candles_by_tf):
                 "final_score": round(base_score, 6),
                 "reason": None,
                 "feature_scores": {k: round(v, 6) for k, v in feature_scores.items() if k != "_diagnostics"},
+                "raw_signal_present": bool(best.get("raw_signal_present")),
             }
         else:
             evaluated[key] = {
@@ -732,5 +740,15 @@ def evaluate_all(symbol, candles_by_tf):
         "timestamp_evaluated": datetime.now(timezone.utc).isoformat(),
     }
     logger.info("[AUDIT] BOT_STRATEGY_DECISION | %s | %s", symbol, json.dumps(audit_payload))
+
+    if include_diagnostics:
+        return {
+            "signals": signals,
+            "evaluated_strategy_scores": audit_payload["evaluated_strategy_scores"],
+            "evaluated_strategies": audit_payload["evaluated_strategies"],
+            "rejected_strategies": audit_payload["rejected_strategies"],
+            "feature_scores": audit_payload["feature_scores"],
+            "timestamp_evaluated": audit_payload["timestamp_evaluated"],
+        }
 
     return signals
