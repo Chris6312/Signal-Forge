@@ -667,6 +667,99 @@ def test_missing_symbol_or_open_positions_keeps_concentration_neutral():
     assert missing_open_positions == pytest.approx(baseline)
 
 
+def test_portfolio_concentration_under_ceiling_keeps_sizing_active():
+    reasoning = {"total_open_risk_pct": 0.04, "max_total_risk_pct": 0.06}
+
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        reasoning=reasoning,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert size > 0
+    assert reasoning["risk_multipliers"]["portfolio_concentration_multiplier"] == pytest.approx(1.0)
+
+
+def test_portfolio_concentration_at_ceiling_blocks_size():
+    reasoning = {"total_open_risk_pct": 0.06, "max_total_risk_pct": 0.06}
+
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        reasoning=reasoning,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert size == 0.0
+    assert reasoning["risk_multipliers"]["portfolio_concentration_multiplier"] == pytest.approx(0.0)
+    assert reasoning["risk_multipliers"]["effective_risk_multiplier"] == pytest.approx(0.0)
+
+
+def test_portfolio_concentration_above_ceiling_blocks_size():
+    reasoning = {"total_open_risk_pct": 0.08, "max_total_risk_pct": 0.06}
+
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        reasoning=reasoning,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert size == 0.0
+    assert reasoning["risk_multipliers"]["portfolio_concentration_multiplier"] == pytest.approx(0.0)
+    assert reasoning["risk_multipliers"]["effective_risk_multiplier"] == pytest.approx(0.0)
+
+
+def test_missing_portfolio_concentration_inputs_remain_neutral():
+    reasoning = {}
+
+    baseline = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        reasoning=reasoning,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert size == pytest.approx(baseline)
+    assert reasoning["risk_multipliers"]["portfolio_concentration_multiplier"] == pytest.approx(1.0)
+
+
 def test_invalid_symbol_concentration_inputs_fall_back_safely():
     baseline = compute_position_size(
         asset_class="crypto",
@@ -933,6 +1026,7 @@ def test_successful_sizing_populates_risk_multipliers_reasoning():
         "drawdown_multiplier",
         "cluster_multiplier",
         "concentration_multiplier",
+        "portfolio_concentration_multiplier",
         "regime_multiplier",
         "effective_risk_multiplier",
     }

@@ -193,3 +193,23 @@ def compute_symbol_concentration_multiplier(concentration_ratio: float) -> float
     if ratio < 0.30:
         return 0.5
     return 0.0
+
+
+def compute_portfolio_concentration_multiplier(
+    total_open_risk_pct: float,
+    max_total_risk_pct: float,
+) -> float:
+    if max_total_risk_pct <= 0:
+        return 1.0
+    if total_open_risk_pct is None:
+        return 1.0
+
+    try:
+        total_risk = float(total_open_risk_pct)
+        max_risk = float(max_total_risk_pct)
+    except (TypeError, ValueError):
+        return 1.0
+
+    if total_risk < max_risk:
+        return 1.0
+    return 0.0

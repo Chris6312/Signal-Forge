@@ -7,6 +7,7 @@ import statistics
 from app.common.account_state import compute_drawdown_pct, should_block_new_entries
 from app.common.portfolio_exposure import (
     compute_cluster_exposure_multiplier,
+    compute_portfolio_concentration_multiplier,
     compute_symbol_concentration_multiplier,
     compute_symbol_concentration_ratio,
 )
@@ -209,6 +210,7 @@ def compute_position_size(
     dd_multiplier = compute_drawdown_risk_multiplier(drawdown_pct * 100.0)
     cluster_multiplier = 1.0
     symbol_concentration_multiplier = 1.0
+    portfolio_concentration_multiplier = 1.0
     regime_multiplier = _resolve_regime_aggressiveness_multiplier(signal=signal, reasoning=reasoning)
     if symbol and open_positions is not None:
         proposed_notional = base_position_size * vol_multiplier * dd_multiplier * entry_value
@@ -227,6 +229,16 @@ def compute_position_size(
         )
         symbol_concentration_multiplier = compute_symbol_concentration_multiplier(concentration_ratio)
 
+    reasoning_map = reasoning if isinstance(reasoning, dict) else getattr(signal, "reasoning", None)
+    if isinstance(reasoning_map, dict):
+        total_open_risk_pct = reasoning_map.get("total_open_risk_pct")
+        max_total_risk_pct = reasoning_map.get("max_total_risk_pct")
+        if total_open_risk_pct is not None and max_total_risk_pct is not None:
+            portfolio_concentration_multiplier = compute_portfolio_concentration_multiplier(
+                total_open_risk_pct=total_open_risk_pct,
+                max_total_risk_pct=max_total_risk_pct,
+            )
+
     final_size = max(
         0.0,
         base_position_size
@@ -234,6 +246,7 @@ def compute_position_size(
         * dd_multiplier
         * cluster_multiplier
         * symbol_concentration_multiplier
+        * portfolio_concentration_multiplier
         * regime_multiplier,
     )
 
@@ -256,10 +269,10 @@ def compute_position_size(
         "drawdown_multiplier": dd_multiplier,
         "cluster_multiplier": cluster_multiplier,
         "concentration_multiplier": symbol_concentration_multiplier,
+        "portfolio_concentration_multiplier": portfolio_concentration_multiplier,
         "regime_multiplier": regime_multiplier,
-        "effective_risk_multiplier": vol_multiplier * dd_multiplier * cluster_multiplier * symbol_concentration_multiplier * regime_multiplier,
+        "effective_risk_multiplier": vol_multiplier * dd_multiplier * cluster_multiplier * symbol_concentration_multiplier * portfolio_concentration_multiplier * regime_multiplier,
     }
-    reasoning_map = reasoning if isinstance(reasoning, dict) else getattr(signal, "reasoning", None)
     if isinstance(reasoning_map, dict):
         reasoning_map["risk_multipliers"] = risk_debug
 
@@ -274,6 +287,7 @@ def compute_position_size(
         "dd_multiplier": dd_multiplier,
         "cluster_multiplier": cluster_multiplier,
         "symbol_concentration_multiplier": symbol_concentration_multiplier,
+        "portfolio_concentration_multiplier": portfolio_concentration_multiplier,
         "regime_multiplier": regime_multiplier,
         "final_size": final_size,
     }
