@@ -15,6 +15,7 @@ import {
 } from 'lucide-react'
 import StatusBadge from '@/components/StatusBadge'
 import { formatET, relativeTime } from '@/utils/time'
+import type { PositionRiskControls } from '@/types/api'
 import clsx from 'clsx'
 
 interface Position {
@@ -43,6 +44,7 @@ interface Position {
   regime_at_entry: string | null
   watchlist_source_id?: string | null
   management_policy_version?: string | null
+  risk_controls?: PositionRiskControls | null
   milestone_state?: {
     tp1_hit?: boolean
     trail_active?: boolean
@@ -78,6 +80,34 @@ function formatHoldHours(value: number | null | undefined) {
 function formatHeldHours(value: number) {
   const fixed = value.toFixed(1)
   return `${fixed} hour${fixed === '1.0' ? '' : 's'}`
+}
+
+function formatPercentage(value: number | null | undefined) {
+  if (value == null) return '—'
+  return `${Number(value).toFixed(2)}%`
+}
+
+function hasRiskControls(riskControls?: PositionRiskControls | null) {
+  if (!riskControls) return false
+  if (riskControls.risk_multipliers && Object.keys(riskControls.risk_multipliers).length > 0) {
+    return true
+  }
+  return [riskControls.volatility_pct, riskControls.maturity_state, riskControls.regime_state].some(
+    value => value !== null && value !== undefined && value !== '',
+  )
+}
+
+function formatRiskMultiplierLabel(key: string) {
+  const labels: Record<string, string> = {
+    volatility_multiplier: 'Volatility',
+    drawdown_multiplier: 'Drawdown',
+    cluster_multiplier: 'Cluster',
+    concentration_multiplier: 'Concentration',
+    portfolio_concentration_multiplier: 'Portfolio Concentration',
+    regime_multiplier: 'Regime',
+    effective_risk_multiplier: 'Effective Risk',
+  }
+  return labels[key] || key.replace(/_/g, ' ')
 }
 
 function holdColorClass(state?: string | null, ratio?: number | null) {
@@ -344,6 +374,44 @@ export default function Positions() {
                              <div>FEES_PAID: <span className="text-system-offline ml-1">{formatCurrency(row.original.fees_paid)}</span></div>
                              <div>SOURCE_ID: <span className="text-brand ml-1">{row.original.watchlist_source_id || 'MANUAL'}</span></div>
                           </div>
+
+                          {hasRiskControls(row.original.risk_controls) && (
+                            <div className="mt-6 pt-4 border-t border-surface-border/30 space-y-3">
+                              <div className="text-[10px] mono text-gray-500 uppercase tracking-widest">Risk Controls</div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[12px]">
+                                <div className="space-y-1">
+                                  <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter">Regime</div>
+                                  <div className="text-sm font-bold text-gray-300">{row.original.risk_controls?.regime_state || '—'}</div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter">Maturity</div>
+                                  <div className="text-sm font-bold text-gray-300">{row.original.risk_controls?.maturity_state || '—'}</div>
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter">Volatility %</div>
+                                  <div className="text-sm font-bold text-gray-300">{formatPercentage(row.original.risk_controls?.volatility_pct)}</div>
+                                </div>
+                                <div className="space-y-1 md:col-span-2">
+                                  <div className="text-[9px] text-gray-500 font-mono uppercase tracking-tighter">Risk Multipliers</div>
+                                  {row.original.risk_controls?.risk_multipliers && Object.keys(row.original.risk_controls.risk_multipliers).length > 0 ? (
+                                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono text-gray-300">
+                                      {Object.keys(row.original.risk_controls.risk_multipliers as Record<string, number | null>).map((key) => {
+                                        const multiplier = (row.original.risk_controls!.risk_multipliers as Record<string, number | null>)[key]
+                                        return (
+                                          <div key={key} className="flex items-center gap-2">
+                                            <span className="text-gray-500">{formatRiskMultiplierLabel(key)}:</span>
+                                            <span>{multiplier ?? '—'}</span>
+                                          </div>
+                                        )
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="text-sm font-bold text-gray-500">—</div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}
