@@ -8,9 +8,18 @@ from typing import Any
 from datetime import datetime, timezone
 from typing import Optional
 from app.common.watchlist_schema_v4 import score_strategy_from_candles, compute_hint_bias, BotDecision, WEIGHTS, compute_features_for_signal, compute_strategy_score
+from app.common.signal_maturity import classify_signal_maturity, compute_breakout_extension_pct, compute_support_distance_pct
 import json
 
 logger = logging.getLogger(__name__)
+
+
+def _signal_maturity_label(price: float, breakout_level: float, support_level: float, has_acceptance: bool) -> str:
+    return classify_signal_maturity(
+        compute_breakout_extension_pct(price, breakout_level),
+        compute_support_distance_pct(price, support_level),
+        has_acceptance,
+    )
 
 
 def _closes(ohlcv):
@@ -166,6 +175,10 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         "fallback_stop": fallback_stop,
         "fallback_tp1": fallback_tp1,
     }
+    if strategy_key == "breakout_retest":
+        reasoning["signal_maturity"] = _signal_maturity_label(current, breakout_anchor, ema20[-1] if ema20 else 0.0, breakout_acceptance_confirmed)
+    elif strategy_key == "trend_continuation":
+        reasoning["signal_maturity"] = _signal_maturity_label(current, recent_high, ema20[-1] if ema20 else 0.0, current > recent_high and current > (ema20[-1] if ema20 else 0.0))
     reasoning.update(_execution_readiness_metadata(strategy_key, reasoning))
 
     if strategy_key == "range_rotation":
@@ -364,6 +377,12 @@ def _execution_readiness_metadata(strategy_key: str, reasoning: dict) -> dict:
         breakout_pct = reasoning.get("breakout_pct")
         if breakout_pct is not None and float(breakout_pct) < 0.5:
             _apply(0.72, "breakout_extension_unproven")
+
+    signal_maturity = reasoning.get("signal_maturity")
+    if strategy_key in {"breakout_retest", "trend_continuation"} and signal_maturity in {"early", "extended"} and ready:
+        ready = False
+        if block_reason is None:
+            block_reason = f"signal_maturity_{signal_maturity}"
 
     return {
         "execution_ready": ready,

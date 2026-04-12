@@ -12,6 +12,11 @@ from app.common.watchlist_schema_v4 import (
     compute_features_for_signal,
 )
 from app.common.watchlist_schema_v4 import compute_strategy_score
+from app.common.signal_maturity import (
+    classify_signal_maturity,
+    compute_breakout_extension_pct,
+    compute_support_distance_pct,
+)
 from app.common.models.audit import AuditSource
 import json
 from app.common.models.bot_decision import BotStrategyDecision
@@ -197,6 +202,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
                 "opening_range_low": round(opening_range_low, 6),
                 "bars_in_session": len(session_bars),
                 "opening_range_acceptance_confirmed": breakout_acceptance_confirmed,
+                "signal_maturity": _signal_maturity_label(current, opening_range_high, ema20_last or 0.0, breakout_acceptance_confirmed),
             })
     elif strategy_key == "volatility_compression_breakout":
         recent_slice = primary[-10:]
@@ -213,7 +219,12 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
                 "compression_high": round(compression_high, 6),
                 "compression_low": round(compression_low, 6),
                 "compression_acceptance_confirmed": compression_acceptance_confirmed,
+                "signal_maturity": _signal_maturity_label(current, compression_high, ema20_last or 0.0, compression_acceptance_confirmed),
             })
+    elif strategy_key == "trend_continuation":
+        extra_reasoning.update({
+            "signal_maturity": _signal_maturity_label(current, highs[-2] if len(highs) >= 2 else 0.0, ema20_last or 0.0, higher_highs and higher_lows and higher_closes),
+        })
 
     return StockEntrySignal(
         strategy=strategy_name,
@@ -318,6 +329,25 @@ def _latest_session_bars(history: list[dict]) -> list[dict]:
     return [bar for dt, bar in dated if dt.date() == latest_date]
 
 
+def _signal_maturity_label(price: float, breakout_level: float, support_level: float, has_acceptance: bool) -> str:
+    return classify_signal_maturity(
+        compute_breakout_extension_pct(price, breakout_level),
+        compute_support_distance_pct(price, support_level),
+        has_acceptance,
+    )
+
+
+def _apply_signal_maturity_readiness_adjustment(readiness: dict, signal_maturity: str | None) -> dict:
+    if signal_maturity not in {"early", "extended"}:
+        return readiness
+
+    adjusted = dict(readiness)
+    if adjusted.get("execution_ready", True):
+        adjusted["execution_ready"] = False
+        adjusted["block_reason"] = f"signal_maturity_{signal_maturity}"
+    return adjusted
+
+
 class OpeningRangeBreakout:
     name = "Opening Range Breakout"
     primary_tf = "5m"
@@ -387,6 +417,7 @@ class OpeningRangeBreakout:
                 "ema20": round(ema20[-1], 6),
                 "breakout_pct": round((current / max(opening_range_high, recent_high) - 1) * 100, 3),
                 "bars_in_session": len(session_bars),
+                "signal_maturity": _signal_maturity_label(current, opening_range_high, ema20[-1], True),
             },
         )
 
@@ -520,6 +551,7 @@ class TrendContinuationLadder:
                 "swing_high_2": round(highs[-2], 6),
                 "swing_low_1": round(lows[-1], 6),
                 "swing_low_2": round(lows[-2], 6),
+                "signal_maturity": _signal_maturity_label(current, highs[-2], ema20[-1], True),
             },
         )
 
@@ -648,6 +680,7 @@ class VolatilityCompressionBreakout:
         atr_recent = _atr_from_history(history[-10:], period=5) if len(history) >= 10 else 0
         atr_prior = _atr_from_history(history[-30:-10], period=14) if len(history) >= 30 else 0
         regime = _detect_regime(history)
+        ema20 = _ema(closes, 20)
 
         if atr_prior == 0 or atr_recent == 0:
             return None
@@ -689,6 +722,7 @@ class VolatilityCompressionBreakout:
                 "compression_high_10": round(compression_high, 6),
                 "compression_low_10": round(compression_low, 6),
                 "breakout_pct": round((current / compression_high - 1) * 100, 3),
+                "signal_maturity": _signal_maturity_label(current, compression_high, ema20[-1] if ema20 else 0.0, True),
             },
         )
 
@@ -746,11 +780,12 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
     breakout_acceptance = bool(reasoning.get("opening_range_acceptance_confirmed") or reasoning.get("compression_acceptance_confirmed"))
 
     def _result(ready: bool, cap: float, reason: str | None):
-        return {
+        readiness = {
             "execution_ready": ready,
             "confidence_cap": min(confidence_cap, cap),
             "block_reason": reason,
         }
+        return _apply_signal_maturity_readiness_adjustment(readiness, reasoning.get("signal_maturity"))
 
     if strategy_key == "opening_range_breakout":
         breakout_level = float(reasoning.get("opening_range_high") or reasoning.get("recent_high_20") or 0.0)
