@@ -292,6 +292,7 @@ async def reset_paper_data(
                 notes="Paper trading reset — initial deposit",
                 created_at=now,
             ))
+        await runtime_state.set_value(f"peak_equity_{asset_class}", float(seed))
 
     await db.commit()
     return {

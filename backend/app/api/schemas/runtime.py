@@ -7,7 +7,7 @@ class RuntimeStateOut(BaseModel):
     crypto_trading_enabled: bool
     stock_trading_enabled: bool
     trading_mode: str = "paper"
-    risk_per_trade_pct: float = 0.02
+    risk_per_trade_pct: float = 0.005
     max_crypto_positions: int
     max_stock_positions: int
     crypto_monitor: str

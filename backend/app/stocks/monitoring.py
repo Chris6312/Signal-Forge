@@ -259,14 +259,14 @@ class StockMonitor:
         from app.common.paper_ledger import size_paper_position, record_paper_fill
 
         trading_mode = await runtime_state.get_trading_mode()
-        risk_pct = await runtime_state.get_risk_per_trade_pct()
+        risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
         risk_pct *= regime_engine.stock_policy.size_multiplier
         is_paper = trading_mode == "paper"
 
         quantity = 0.0
         if is_paper:
             quantity = await size_paper_position(
-                db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct
+                db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
             )
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)

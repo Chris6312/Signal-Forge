@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.common.redis_client import get_redis
+from app.common.risk_config import get_default_risk_per_trade_pct
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,11 @@ class RuntimeState:
             "crypto_trading_enabled": json.dumps(True),
             "stock_trading_enabled":  json.dumps(True),
             "trading_mode":           json.dumps("paper"),
-            "risk_per_trade_pct":     json.dumps(0.02),
+            "risk_per_trade_pct":     json.dumps(get_default_risk_per_trade_pct("stock")),
+            "risk_per_trade_pct_stocks": json.dumps(get_default_risk_per_trade_pct("stock")),
+            "risk_per_trade_pct_crypto": json.dumps(get_default_risk_per_trade_pct("crypto")),
+            "peak_equity_stock":     json.dumps(0.0),
+            "peak_equity_crypto":    json.dumps(0.0),
             "max_crypto_positions":   json.dumps(5),
             "max_stock_positions":    json.dumps(5),
         }
@@ -115,8 +120,30 @@ class RuntimeState:
     async def get_trading_mode(self) -> str:
         return await self.get_value("trading_mode", "paper")
 
-    async def get_risk_per_trade_pct(self) -> float:
-        return float(await self.get_value("risk_per_trade_pct", 0.02))
+    async def get_risk_per_trade_pct(self, asset_class: str | None = None) -> float:
+        state = await self.get_state()
+        if asset_class == "crypto":
+            return float(
+                state.get(
+                    "risk_per_trade_pct_crypto",
+                    state.get("risk_per_trade_pct", get_default_risk_per_trade_pct("crypto")),
+                )
+            )
+        if asset_class == "stock":
+            return float(
+                state.get(
+                    "risk_per_trade_pct_stocks",
+                    state.get("risk_per_trade_pct", get_default_risk_per_trade_pct("stock")),
+                )
+            )
+
+        value = state.get("risk_per_trade_pct", get_default_risk_per_trade_pct(asset_class))
+        if isinstance(value, dict):
+            normalized = (asset_class or "stock").strip().lower()
+            if normalized in ("crypto", "cryptos", "digital"):
+                return float(value.get("crypto", get_default_risk_per_trade_pct("crypto")))
+            return float(value.get("stock", get_default_risk_per_trade_pct("stock")))
+        return float(value)
 
     async def update_worker_status(self, worker: str, status: str):
         await self.set_value(worker, status)

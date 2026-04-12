@@ -5,8 +5,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.account_state import get_peak_equity, note_peak_equity
 from app.common.models.ledger import LedgerAccount, LedgerEntry, EntryType
 from app.common.models.order import Order, OrderStatus
+from app.common.position_sizer import compute_position_size
+from app.common.risk_config import resolve_risk_per_trade_pct
+from app.common.runtime_state import runtime_state
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,8 @@ async def size_paper_position(
     asset_class: str,
     entry_price: float,
     stop_price: float,
-    risk_per_trade_pct: float,
+    risk_per_trade_pct: float | None,
+    signal=None,
 ) -> float:
     """Return quantity sized to risk a fixed % of available cash. Capped at 10% of balance."""
     stmt = select(LedgerAccount).where(LedgerAccount.asset_class == asset_class)
@@ -39,14 +44,36 @@ async def size_paper_position(
         )
         return 0.0
 
-    risk_amount = account.cash_balance * risk_per_trade_pct
-    quantity = risk_amount / risk_per_unit
+    current_equity = float(account.cash_balance or 0.0) + float(account.unrealized_pnl or 0.0)
+    peak_equity = await get_peak_equity(asset_class, current_equity)
+    runtime_risk_override = await runtime_state.get_value(f"risk_per_trade_pct_{asset_class}", None)
+    resolved_risk_pct = resolve_risk_per_trade_pct(
+        asset_class,
+        risk_per_trade_pct if risk_per_trade_pct is not None else runtime_risk_override,
+    )
+
+    quantity = compute_position_size(
+        asset_class=asset_class,
+        equity=current_equity,
+        entry_price=entry_price,
+        stop_distance=risk_per_unit,
+        risk_per_trade_pct=resolved_risk_pct,
+        current_equity=current_equity,
+        peak_equity=peak_equity,
+        signal=signal,
+        reasoning=getattr(signal, "reasoning", None),
+    )
+
     cost = quantity * entry_price
+    cash_cap = account.cash_balance * 0.10
+    if cost > cash_cap and entry_price > 0:
+        quantity = cash_cap / entry_price
+        quantity = float(int(quantity)) if asset_class == "stock" else round(quantity, 8)
 
-    if cost > account.cash_balance * 0.10:
-        quantity = (account.cash_balance * 0.10) / entry_price
+    if quantity > 0:
+        await note_peak_equity(asset_class, current_equity)
 
-    return round(quantity, 8)
+    return quantity
 
 
 async def record_paper_fill(
@@ -73,6 +100,7 @@ async def record_paper_fill(
     cost = round(quantity * price, 8)
     account.cash_balance -= cost
     account.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    await note_peak_equity(asset_class, float(account.cash_balance or 0.0) + float(account.unrealized_pnl or 0.0))
 
     entry = LedgerEntry(
         id=uuid.uuid4(),
@@ -109,6 +137,7 @@ async def record_paper_fill(
         fee = round(cost * KRAKEN_TAKER_FEE_RATE, 8)
         account.cash_balance -= fee
         account.fees_total = (account.fees_total or 0.0) + fee
+        await note_peak_equity(asset_class, float(account.cash_balance or 0.0) + float(account.unrealized_pnl or 0.0))
         fee_entry = LedgerEntry(
             id=uuid.uuid4(),
             asset_class=asset_class,
