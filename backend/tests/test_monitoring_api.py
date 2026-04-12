@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from app.api.routes.monitoring import _select_top_signal, _strategy_key
+from app.api.routes import monitoring as monitoring_route
+from app.api.routes.monitoring import _select_top_signal, _strategy_key, get_monitoring_candidates
 from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal
 from app.stocks.monitoring import StockMonitor, _select_top_signal as stock_select_top_signal
 from tests.conftest import make_candle, trending_down_ohlcv, trending_up_ohlcv
@@ -93,6 +95,58 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
 
     assert create_position.await_count == 1
     assert create_position.await_args.args[2] is second
+
+
+@pytest.mark.asyncio
+async def test_monitoring_route_reuses_cached_diagnostics_for_same_trigger_candle(monkeypatch):
+    monitoring_route._EVAL_CACHE.clear()
+
+    ws = SimpleNamespace(
+        symbol="AAPL",
+        asset_class="stock",
+        state="active",
+        added_at=None,
+        watchlist_source_id=None,
+    )
+    def _db():
+        symbols_result = MagicMock()
+        symbols_result.scalars.return_value.all.return_value = [ws]
+        open_position_result = MagicMock()
+        open_position_result.first.return_value = None
+        open_position_result.scalar_one.return_value = 0
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[symbols_result, open_position_result, open_position_result])
+        return db
+
+    signal = SimpleNamespace(
+        strategy="pullback_reclaim",
+        strategy_key="pullback_reclaim",
+        confidence=0.88,
+        entry_price=100.0,
+        initial_stop=95.0,
+        profit_target_1=105.0,
+        profit_target_2=110.0,
+        regime="neutral",
+        notes="cached",
+    )
+    evaluate_all = MagicMock(return_value={"signals": [signal], "top_strategy": "pullback_reclaim", "top_confidence": 0.88})
+    monkeypatch.setattr("app.stocks.strategies.entry_strategies.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_timesales", AsyncMock(return_value=[
+        {"time": datetime(2026, 4, 11, 9, 30, tzinfo=timezone.utc).isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100},
+        {"time": datetime(2026, 4, 11, 9, 35, tzinfo=timezone.utc).isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100},
+        {"time": datetime(2026, 4, 11, 9, 40, tzinfo=timezone.utc).isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100},
+    ]))
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_history", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.api.routes.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.api.routes.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr("app.api.routes.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+
+    first = await get_monitoring_candidates(asset_class="stock", db=_db())
+    second = await get_monitoring_candidates(asset_class="stock", db=_db())
+
+    assert first["total"] == 1
+    assert second["total"] == 1
+    assert evaluate_all.call_count == 1
 
 
 @pytest.mark.asyncio

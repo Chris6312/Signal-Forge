@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 
 from fastapi import APIRouter, Depends, Query
@@ -17,6 +18,7 @@ from app.regime import regime_engine
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_EVAL_CACHE: dict[tuple[str, str, float], dict] = {}
 
 
 def _strategy_key(value: str | None) -> str | None:
@@ -27,6 +29,33 @@ def _strategy_key(value: str | None) -> str | None:
 
 def _signal_key(signal) -> str | None:
     return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _latest_closed_ts(candles, interval_minutes: int) -> float:
+    if not candles:
+        return 0.0
+
+    last_item = candles[-1]
+    if isinstance(last_item, dict) and "time" in last_item:
+        text = str(last_item.get("time") or "").strip().replace("Z", "+00:00")
+        if " " in text and "T" not in text:
+            text = text.replace(" ", "T", 1)
+        try:
+            dt = datetime.fromisoformat(text)
+            if len(text) == 10 and interval_minutes >= 1440:
+                dt = datetime.fromisoformat(text + "T00:00+00:00")
+                return dt.astimezone(timezone.utc).timestamp() + (interval_minutes * 60)
+            return dt.astimezone(timezone.utc).timestamp()
+        except Exception:
+            return 0.0
+
+    if isinstance(last_item, (list, tuple)) and len(last_item) > 0:
+        try:
+            return float(last_item[0]) + (interval_minutes * 60)
+        except Exception:
+            return 0.0
+
+    return 0.0
 
 
 def _select_top_signal(signals, top_strategy: str | None):
@@ -108,6 +137,7 @@ async def get_monitoring_candidates(
 
     async def _top_signal(ws: WatchlistSymbol):
         try:
+            cache_key = None
             if ws.asset_class == "crypto":
                 from app.crypto.kraken_client import kraken_client
                 from app.crypto.strategies.entry_strategies import evaluate_all
@@ -119,6 +149,10 @@ async def get_monitoring_candidates(
                     kraken_client.get_ohlcv(can, interval=240),
                     kraken_client.get_ohlcv(can, interval=1440),
                 )
+                trigger_ts = _latest_closed_ts(ohlcv_15m, 15)
+                cache_key = (ws.asset_class, can, trigger_ts)
+                if trigger_ts and cache_key in _EVAL_CACHE:
+                    return _EVAL_CACHE[cache_key]
                 raw_result = evaluate_all(
                     can,
                     {
@@ -138,6 +172,10 @@ async def get_monitoring_candidates(
                     tradier_client.get_timesales(ws.symbol, interval="15min"),
                     tradier_client.get_history(ws.symbol),
                 )
+                trigger_ts = _latest_closed_ts(tf5m, 5)
+                cache_key = (ws.asset_class, ws.symbol, trigger_ts)
+                if trigger_ts and cache_key in _EVAL_CACHE:
+                    return _EVAL_CACHE[cache_key]
                 raw_result = evaluate_all(
                     ws.symbol,
                     {
@@ -153,10 +191,13 @@ async def get_monitoring_candidates(
             normalized = _normalize_eval_result(raw_result)
             signals = normalized["signals"]
             top_signal = _select_top_signal(signals, normalized["top_strategy"])
-            return {
+            payload = {
                 "top_signal": top_signal,
                 "diagnostics": normalized,
             }
+            if cache_key and cache_key[2]:
+                _EVAL_CACHE[cache_key] = payload
+            return payload
         except Exception as exc:
             logger.warning("Top-signal evaluation failed for %s (%s): %s", ws.symbol, ws.asset_class, exc)
             return exc
