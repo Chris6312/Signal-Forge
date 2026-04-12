@@ -4,6 +4,32 @@ from app.common.position_time import compute_position_hold_metrics
 from app.services.runner_protection import get_protection_snapshot
 
 
+def _get_reasoning(position: Any) -> dict[str, Any] | None:
+    for attr in ("reasoning", "entryReasoning", "intentContext"):
+        reasoning = getattr(position, attr, None)
+        if isinstance(reasoning, dict):
+            return reasoning
+    return None
+
+
+def _build_risk_controls(reasoning: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(reasoning, dict):
+        return None
+
+    risk_controls: dict[str, Any] = {}
+    for target_key, source_key in (
+        ("risk_multipliers", "risk_multipliers"),
+        ("volatility_pct", "volatility_pct"),
+        ("maturity_state", "signal_maturity"),
+        ("regime_state", "regime"),
+    ):
+        value = reasoning.get(source_key)
+        if value is not None:
+            risk_controls[target_key] = value
+
+    return risk_controls or None
+
+
 def build_position_inspect_payload(position: Any) -> dict[str, Any]:
     snapshot = get_protection_snapshot(position)
     hold_metrics = compute_position_hold_metrics(
@@ -11,7 +37,8 @@ def build_position_inspect_payload(position: Any) -> dict[str, Any]:
         getattr(position, "max_hold_hours", None),
     )
     milestone_state = getattr(position, "milestone_state", None)
-    return {
+    risk_controls = _build_risk_controls(_get_reasoning(position))
+    payload = {
         "id": getattr(position, "id", None),
         "symbol": getattr(position, "symbol", None),
         "asset_class": getattr(position, "asset_class", None),
@@ -53,3 +80,6 @@ def build_position_inspect_payload(position: Any) -> dict[str, Any]:
         "created_at": getattr(position, "created_at", None),
         "updated_at": getattr(position, "updated_at", None),
     }
+    if risk_controls is not None:
+        payload["risk_controls"] = risk_controls
+    return payload

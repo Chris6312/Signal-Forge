@@ -150,3 +150,120 @@ def test_build_position_inspect_payload_preserves_frozen_policy_and_milestone_st
     assert payload["milestone_state"] == milestone_state
     assert payload["management_policy_version"] == "1.0"
     assert payload["max_hold_hours"] == 36
+
+
+def test_build_position_inspect_payload_includes_risk_controls(monkeypatch):
+    reasoning = {
+        "risk_multipliers": {"volatility": 0.75, "regime": 1.2},
+        "volatility_pct": 0.083,
+        "signal_maturity": "confirmed",
+        "regime": "trend",
+    }
+
+    position = SimpleNamespace(
+        id="pos-3",
+        symbol="SOL/USD",
+        asset_class="crypto",
+        state="OPEN",
+        entry_price=150.0,
+        current_price=158.0,
+        quantity=3.0,
+        entry_time=datetime(2026, 1, 1, 10, 0, 0),
+        entry_strategy="momentum",
+        exit_strategy="partial",
+        initial_stop=140.0,
+        current_stop=147.5,
+        profit_target_1=160.0,
+        profit_target_2=170.0,
+        max_hold_hours=24,
+        regime_at_entry="trend",
+        watchlist_source_id="manual",
+        management_policy_version="1.0",
+        frozen_policy={},
+        milestone_state={},
+        reasoning=reasoning,
+        exit_price=None,
+        exit_time=None,
+        exit_reason=None,
+        pnl_realized=0.0,
+        pnl_unrealized=24.0,
+        fees_paid=0.0,
+        created_at=datetime(2026, 1, 1, 10, 0, 0),
+        updated_at=datetime(2026, 1, 1, 10, 0, 0),
+    )
+
+    monkeypatch.setattr(
+        "app.services.watchlist_service.compute_position_hold_metrics",
+        lambda *args, **kwargs: SimpleNamespace(
+            hours_held=4.0,
+            max_hold_hours=24,
+            hold_ratio=0.1666666667,
+            time_risk_state="green",
+            as_dict=lambda: {
+                "hours_held": 4.0,
+                "max_hold_hours": 24,
+                "hold_ratio": 0.1666666667,
+                "time_risk_state": "green",
+            },
+        ),
+    )
+
+    payload = build_position_inspect_payload(position)
+
+    assert payload["risk_controls"]["risk_multipliers"] == reasoning["risk_multipliers"]
+    assert payload["risk_controls"]["regime_state"] == reasoning["regime"]
+
+
+def test_build_position_inspect_payload_omits_risk_controls_when_missing(monkeypatch):
+    position = SimpleNamespace(
+        id="pos-4",
+        symbol="ADA/USD",
+        asset_class="crypto",
+        state="OPEN",
+        entry_price=1.0,
+        current_price=1.05,
+        quantity=1000.0,
+        entry_time=datetime(2026, 1, 1, 10, 0, 0),
+        entry_strategy="momentum",
+        exit_strategy="partial",
+        initial_stop=0.9,
+        current_stop=0.95,
+        profit_target_1=1.1,
+        profit_target_2=1.2,
+        max_hold_hours=24,
+        regime_at_entry="trend",
+        watchlist_source_id="manual",
+        management_policy_version="1.0",
+        frozen_policy={},
+        milestone_state={},
+        entryReasoning={"some_other_key": "value"},
+        exit_price=None,
+        exit_time=None,
+        exit_reason=None,
+        pnl_realized=0.0,
+        pnl_unrealized=50.0,
+        fees_paid=0.0,
+        created_at=datetime(2026, 1, 1, 10, 0, 0),
+        updated_at=datetime(2026, 1, 1, 10, 0, 0),
+    )
+
+    monkeypatch.setattr(
+        "app.services.watchlist_service.compute_position_hold_metrics",
+        lambda *args, **kwargs: SimpleNamespace(
+            hours_held=2.0,
+            max_hold_hours=24,
+            hold_ratio=0.0833333333,
+            time_risk_state="green",
+            as_dict=lambda: {
+                "hours_held": 2.0,
+                "max_hold_hours": 24,
+                "hold_ratio": 0.0833333333,
+                "time_risk_state": "green",
+            },
+        ),
+    )
+
+    payload = build_position_inspect_payload(position)
+
+    assert "risk_controls" not in payload
+    assert payload["milestone_state"] == {}
