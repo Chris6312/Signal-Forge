@@ -289,10 +289,6 @@ export default function Monitoring() {
   }, [evalSymbol, evalClass])
 
   const diagnosticCards = useMemo(() => normalizeStrategyCards(evalResult), [evalResult])
-  const selectedDiagnostic = useMemo(
-    () => diagnosticCards.find((card) => card.selected) ?? diagnosticCards[0] ?? null,
-    [diagnosticCards],
-  )
 
   const columns = useMemo(() => [
     columnHelper.accessor('symbol', {
@@ -491,17 +487,6 @@ export default function Monitoring() {
               <div className="space-y-3">
                 <div className="text-[10px] text-gray-500 mono uppercase tracking-widest">
                   Strategy Diagnostics ({diagnosticCards.length})
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 mono text-[10px] uppercase tracking-widest text-gray-300">
-                  <span className="text-gray-500">Backend Winner</span>
-                  <span className="text-white font-bold">{selectedDiagnostic?.strategyLabel ?? '—'}</span>
-                  <span className="text-gray-500">@</span>
-                  <span className="text-system-online font-bold">
-                    {typeof (evalResult.top_confidence ?? selectedDiagnostic?.confidence) === 'number'
-                      ? `${((evalResult.top_confidence ?? selectedDiagnostic?.confidence ?? 0) * 100).toFixed(0)}%`
-                      : '—'}
-                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

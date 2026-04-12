@@ -179,12 +179,11 @@ class StockMonitor:
         except Exception:
             pass
 
-        signals = evaluate_all(ws.symbol, candles_by_tf, include_diagnostics=True)
-        signals = _extract_signals(signals)
-        if not signals:
+        eval_result = evaluate_all(ws.symbol, candles_by_tf, include_diagnostics=True)
+        if not _extract_signals(eval_result):
             return
 
-        best = _select_top_signal(signals)
+        best = _select_top_signal(eval_result)
         if not best:
             return
         logger.info("Stock entry signal: %s via %s (confidence=%.2f)", ws.symbol, best.strategy, best.confidence)
