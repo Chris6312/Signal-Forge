@@ -49,6 +49,10 @@ def _extract_signals(result):
     return []
 
 
+def _readiness_metrics(signal) -> dict:
+    return dict(getattr(signal, "reasoning", {}) or {})
+
+
 def _select_top_signal(result):
     signals = _extract_signals(result)
     if not signals:
@@ -209,6 +213,14 @@ class StockMonitor:
             return
 
         readiness = _execution_readiness_adjustment(best, candles_by_tf)
+        readiness = runtime_state.stabilize_monitoring_readiness(
+            ASSET_CLASS,
+            ws.symbol,
+            _signal_key(best),
+            self._trigger_close_ts(ws.symbol),
+            readiness,
+            _readiness_metrics(best),
+        )
         if hasattr(best, "reasoning"):
             best.reasoning = dict(getattr(best, "reasoning", {}) or {})
             best.reasoning["execution_ready"] = readiness["execution_ready"]

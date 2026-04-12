@@ -423,3 +423,33 @@ def test_no_ai_hint_means_zero_bias(caplog):
             assert payload["ai_hint_bias_amount"] == pytest.approx(0.0)
             assert payload["ai_hint_strategy"] is None
     assert found
+
+
+def _stock_volatility_compression_history():
+    history = ranging_history(30, center=100.0, amplitude=3.0)
+    history.extend(ranging_history(10, center=100.0, amplitude=0.25))
+    history.append(make_bar(103.5, spread=0.002))
+    return history
+
+
+@pytest.mark.parametrize(
+    ("history_factory", "expected_top_strategy"),
+    [
+        (lambda: trending_up_history(64, start=100.0, end=199.0) + [make_bar(215.0, spread=0.002)], "opening_range_breakout"),
+        (
+            lambda: (lambda base: base + [make_bar(175.0)])(
+                trending_up_history(56, start=100.0, end=180.0) + [make_bar(155.0) for _ in range(5)]
+            ),
+            "pullback_reclaim",
+        ),
+        (lambda: trending_up_history(65), "trend_continuation"),
+        (_stock_volatility_compression_history, "volatility_compression_breakout"),
+    ],
+)
+def test_stock_ranking_matrix_keeps_expected_winner(history_factory, expected_top_strategy):
+    result = evaluate_all("AAPL", history_factory(), include_diagnostics=True)
+
+    assert result["top_strategy"] == expected_top_strategy
+    assert result["top_strategy"] in result["evaluated_strategy_scores"]
+    assert result["signals"]
+    assert result["signals"][0].strategy_key == expected_top_strategy

@@ -35,6 +35,22 @@ class StockEntrySignal:
     notes: str = ""
     reasoning: dict = field(default_factory=dict)
 
+    @property
+    def strategy_key(self) -> str:
+        mapping = {
+            "Opening Range Breakout": "opening_range_breakout",
+            "Pullback Reclaim": "pullback_reclaim",
+            "Trend Continuation Ladder": "trend_continuation",
+            "Trend Continuation": "trend_continuation",
+            "Momentum Breakout Continuation": "trend_continuation",
+            "Mean Reversion Bounce": "mean_reversion_bounce",
+            "Failed Breakdown Reclaim": "failed_breakdown_reclaim",
+            "Volatility Compression Breakout": "volatility_compression_breakout",
+            "Breakout Retest Hold": "breakout_retest",
+            "Range Rotation Reversal": "range_rotation",
+        }
+        return mapping.get(self.strategy, self.strategy.strip().lower().replace(" ", "_"))
+
 
 def _ema(prices: list[float], period: int) -> list[float]:
     if len(prices) < period:
@@ -805,6 +821,8 @@ def _strategy_name_to_key(name: str) -> str | None:
         return "pullback_reclaim"
     if "Failed Breakdown Reclaim" in name:
         return "failed_breakdown_reclaim"
+    if "Trend Continuation Ladder" in name:
+        return "trend_continuation"
     if "Trend Continuation" in name or "Momentum Breakout Continuation" in name:
         return "trend_continuation"
     if "Mean Reversion Bounce" in name:
@@ -848,8 +866,17 @@ def _strategy_specific_bonus(strategy_key: str, signal: StockEntrySignal) -> flo
         if strategy_key == "volatility_compression_breakout":
             recent_atr = float(reasoning.get("recent_atr_5") or 0.0)
             prior_atr = float(reasoning.get("prior_atr_14") or 0.0)
+            compression_ratio = float(reasoning.get("compression_ratio") or 1.0)
             if recent_atr > 0 and prior_atr > 0 and recent_atr < prior_atr * 0.60:
-                bonus += 0.06
+                bonus += 0.08
+            if compression_ratio <= 0.75:
+                bonus += 0.35
+            if compression_ratio <= 0.60:
+                bonus += 0.15
+            if reasoning.get("reclaim_confirmed") and not reasoning.get("higher_highs_confirmed") and not reasoning.get("higher_lows_confirmed"):
+                bonus += 0.30
+            if reasoning.get("compression_acceptance_confirmed"):
+                bonus += 0.10
         if strategy_key == "opening_range_breakout" and reasoning.get("opening_range_high"):
             bonus += 0.04
 

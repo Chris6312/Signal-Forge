@@ -9,6 +9,7 @@ from app.api.routes.monitoring import _select_top_signal, _strategy_key, get_mon
 from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal, _execution_readiness_adjustment as crypto_execution_readiness_adjustment
 from app.stocks.monitoring import StockMonitor, _select_top_signal as stock_select_top_signal
 from app.stocks.strategies.entry_strategies import _execution_readiness_adjustment as stock_execution_readiness_adjustment
+from app.common.runtime_state import runtime_state
 from tests.conftest import make_bar, make_candle, trending_down_ohlcv, trending_up_history, trending_up_ohlcv
 
 
@@ -96,6 +97,192 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
 
     assert create_position.await_count == 1
     assert create_position.await_args.args[2] is second
+
+
+def test_readiness_memory_blocks_until_support_recovers_materially():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "trend_continuation",
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.5, "block_reason": "fast_support_lost_after_breakout"},
+        {"close": 103.0, "current_vs_ema20": -1.5},
+    )
+    marginal = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "trend_continuation",
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 103.2, "current_vs_ema20": 0.1},
+    )
+    improved = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "trend_continuation",
+        300.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 106.0, "current_vs_ema20": 0.6},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert marginal["execution_ready"] is False
+    assert marginal["block_reason"] == "fast_support_lost_after_breakout"
+    assert improved["execution_ready"] is True
+
+
+def test_readiness_memory_blocks_until_extension_contracts_enough():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        "crypto",
+        "BTC/USD",
+        "trend_continuation",
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.6, "block_reason": "continuation_too_extended"},
+        {"close": 120.0, "support_extension_pct": 5.0},
+    )
+    marginal = runtime_state.stabilize_monitoring_readiness(
+        "crypto",
+        "BTC/USD",
+        "trend_continuation",
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 118.5, "support_extension_pct": 4.7},
+    )
+    improved = runtime_state.stabilize_monitoring_readiness(
+        "crypto",
+        "BTC/USD",
+        "trend_continuation",
+        300.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 116.0, "support_extension_pct": 4.0},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert marginal["execution_ready"] is False
+    assert marginal["block_reason"] == "continuation_too_extended"
+    assert improved["execution_ready"] is True
+
+
+def test_readiness_memory_resets_when_strategy_changes():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "trend_continuation",
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.5, "block_reason": "fast_support_lost_after_breakout"},
+        {"close": 103.0, "current_vs_ema20": -1.0},
+    )
+    reset = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "pullback_reclaim",
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.8, "block_reason": None},
+        {"close": 104.5, "current_vs_ema20": 0.5, "reclaim_confirmed": True},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert reset["execution_ready"] is True
+
+
+def test_readiness_memory_blocks_until_support_recovers_materially():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    key = ("stock", "AAPL", "trend_continuation")
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.5, "block_reason": "fast_support_lost_after_breakout"},
+        {"close": 103.0, "current_vs_ema20": -1.5},
+    )
+    marginal = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 103.2, "current_vs_ema20": 0.1},
+    )
+    improved = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        300.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 106.0, "current_vs_ema20": 0.6},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert marginal["execution_ready"] is False
+    assert marginal["block_reason"] == "fast_support_lost_after_breakout"
+    assert improved["execution_ready"] is True
+
+
+def test_readiness_memory_blocks_until_extension_contracts_enough():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    key = ("crypto", "BTC/USD", "trend_continuation")
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.6, "block_reason": "continuation_too_extended"},
+        {"close": 120.0, "support_extension_pct": 5.0},
+    )
+    marginal = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 118.5, "support_extension_pct": 4.7},
+    )
+    improved = runtime_state.stabilize_monitoring_readiness(
+        key[0],
+        key[1],
+        key[2],
+        300.0,
+        {"execution_ready": True, "confidence_cap": 0.9, "block_reason": None},
+        {"close": 116.0, "support_extension_pct": 4.0},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert marginal["execution_ready"] is False
+    assert marginal["block_reason"] == "continuation_too_extended"
+    assert improved["execution_ready"] is True
+
+
+def test_readiness_memory_resets_when_strategy_changes():
+    runtime_state.clear_monitoring_readiness_memory()
+
+    blocked = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "trend_continuation",
+        100.0,
+        {"execution_ready": False, "confidence_cap": 0.5, "block_reason": "fast_support_lost_after_breakout"},
+        {"close": 103.0, "current_vs_ema20": -1.0},
+    )
+    reset = runtime_state.stabilize_monitoring_readiness(
+        "stock",
+        "AAPL",
+        "pullback_reclaim",
+        200.0,
+        {"execution_ready": True, "confidence_cap": 0.8, "block_reason": None},
+        {"close": 104.5, "current_vs_ema20": 0.5, "reclaim_confirmed": True},
+    )
+
+    assert blocked["execution_ready"] is False
+    assert reset["execution_ready"] is True
 
 
 def test_stock_and_crypto_extension_handling_is_directionally_consistent():

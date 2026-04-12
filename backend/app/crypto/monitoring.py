@@ -48,6 +48,10 @@ def _signal_key(signal) -> str | None:
     return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
 
 
+def _readiness_metrics(signal) -> dict:
+    return dict(getattr(signal, "reasoning", {}) or {})
+
+
 def _execution_readiness_adjustment(signal, candles_by_tf):
     reasoning = dict(getattr(signal, "reasoning", {}) or {})
     strategy_key = _signal_key(signal)
@@ -370,6 +374,14 @@ class CryptoMonitor:
             return
 
         readiness = _execution_readiness_adjustment(best, candles_by_tf)
+        readiness = runtime_state.stabilize_monitoring_readiness(
+            ASSET_CLASS,
+            can,
+            _signal_key(best),
+            self._trigger_close_ts(can),
+            readiness,
+            _readiness_metrics(best),
+        )
         if hasattr(best, "reasoning"):
             best.reasoning = dict(getattr(best, "reasoning", {}) or {})
             best.reasoning["execution_ready"] = readiness["execution_ready"]

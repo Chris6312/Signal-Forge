@@ -247,6 +247,59 @@ class EntrySignal:
     notes: str = ""
     reasoning: dict = field(default_factory=dict)
 
+    @property
+    def strategy_key(self) -> str:
+        mapping = {
+            "Momentum Breakout Continuation": "trend_continuation",
+            "Pullback Reclaim": "pullback_reclaim",
+            "Mean Reversion Bounce": "mean_reversion_bounce",
+            "Range Rotation Reversal": "range_rotation",
+            "Breakout Retest Hold": "breakout_retest",
+            "Failed Breakdown Reclaim": "pullback_reclaim",
+        }
+        return mapping.get(self.strategy, self.strategy.strip().lower().replace(" ", "_"))
+
+
+def _strategy_specific_bonus(strategy_key: str, signal: EntrySignal) -> float:
+    reasoning = signal.reasoning or {}
+    bonus = 0.0
+
+    if strategy_key == "pullback_reclaim":
+        if reasoning.get("dip_below_ema_confirmed"):
+            bonus += 0.05
+        if reasoning.get("reclaim_confirmed"):
+            bonus += 0.08
+        if not reasoning.get("dip_below_ema_confirmed") and not reasoning.get("reclaim_confirmed"):
+            bonus -= 0.12
+
+    elif strategy_key == "trend_continuation":
+        if reasoning.get("higher_highs_confirmed"):
+            bonus += 0.04
+        if reasoning.get("higher_lows_confirmed"):
+            bonus += 0.04
+        if reasoning.get("higher_closes_confirmed"):
+            bonus += 0.05
+        if reasoning.get("three_ascending_closes"):
+            bonus += 0.04
+        if not reasoning.get("reclaim_confirmed") and not reasoning.get("dip_below_ema_confirmed"):
+            bonus += 0.08
+
+    elif strategy_key == "breakout_retest":
+        if reasoning.get("price_in_retest_band"):
+            bonus += 0.10
+        if reasoning.get("breakout_acceptance_confirmed"):
+            bonus += 0.08
+
+    elif strategy_key == "mean_reversion_bounce":
+        if reasoning.get("bounce_confirmed"):
+            bonus += 0.04
+        if signal.regime == "ranging":
+            bonus += 0.03
+        if signal.regime == "trending_up":
+            bonus -= 0.05
+
+    return round(bonus, 6)
+
 
 def _execution_readiness_metadata(strategy_key: str, reasoning: dict) -> dict:
     reasoning = reasoning or {}
@@ -741,6 +794,7 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
 
             feature_scores = compute_features_for_signal(key, candidate, asset_class="crypto")
             base_score = score_strategy_from_candles(key, feature_scores, regime=getattr(candidate, "regime", None), asset_class="crypto")
+            final_score = min(1.0, round(base_score, 6) + _strategy_specific_bonus(key, candidate))
 
             logger.debug(
                 "CRYPTO_SCORE_DEBUG | %s | %s | feature_scores=%s | base_score_raw=%r | threshold_raw=%r | raw_signal_present=%s | passes=%s",
@@ -753,14 +807,15 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
                 round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
             )
 
-            candidate.confidence = max(getattr(candidate, "confidence", 0.0) or 0.0, round(base_score, 6))
+            candidate.confidence = max(getattr(candidate, "confidence", 0.0) or 0.0, final_score)
 
             strategy_summaries[strat.name] = {
                 "key": key,
                 "signal": candidate,
                 "feature_scores": feature_scores,
                 "base_score": round(base_score, 6),
-                "passes_threshold": round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6),
+                "final_score": round(final_score, 6),
+                "passes_threshold": final_score >= round(MIN_SCORE_THRESHOLD, 6),
                 "raw_signal_present": sig is not None,
             }
 
@@ -786,17 +841,18 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
             summary = strategy_summaries.get(pattern)
             if not summary:
                 continue
-            if best is None or summary["base_score"] > best["base_score"]:
+            if best is None or summary["final_score"] > best["final_score"]:
                 best = summary
         if best:
             signal = best["signal"]
             feature_scores = best["feature_scores"]
             base_score = compute_strategy_score(key, feature_scores, regime=getattr(signal, "regime", None), asset_class="crypto")
+            final_score = min(1.0, round(base_score, 6) + _strategy_specific_bonus(key, signal))
             evaluated[key] = {
                 "valid": True,
                 "base_score": round(base_score, 6),
                 "bias": 0.0,
-                "final_score": round(base_score, 6),
+                "final_score": round(final_score, 6),
                 "reason": None,
                 "feature_scores": {k: round(v, 6) for k, v in feature_scores.items() if k != "_diagnostics"},
                 "raw_signal_present": bool(best.get("raw_signal_present")),

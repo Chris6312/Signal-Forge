@@ -346,3 +346,34 @@ def test_crypto_execution_readiness_suppresses_stretched_reclaim_and_continuatio
     assert stretched_continuation["execution_ready"] is False
     assert stretched_continuation["execution_block_reason"] == "continuation_too_extended"
 
+
+def _crypto_breakout_retest_history():
+    history = trending_up_ohlcv(45, start=100.0, end=120.0)
+    history[-4] = make_candle(41, 119.0, spread=0.002)
+    history[-3] = make_candle(42, 119.4, spread=0.002)
+    history[-2] = make_candle(43, 120.2, spread=0.002)
+    history[-1] = make_candle(44, 121.0, spread=0.002)
+    return history
+
+
+@pytest.mark.parametrize(
+    ("history_factory", "expected_top_strategy"),
+    [
+        (lambda: trending_up_ohlcv(65), "trend_continuation"),
+        (_crypto_breakout_retest_history, "breakout_retest"),
+        (
+            lambda: (lambda base: base + [make_candle(61, 175.0)])(
+                trending_up_ohlcv(56, start=100.0, end=180.0) + [make_candle(56 + i, 155.0) for i in range(5)]
+            ),
+            "pullback_reclaim",
+        ),
+    ],
+)
+def test_crypto_ranking_matrix_keeps_expected_winner(history_factory, expected_top_strategy):
+    result = evaluate_all("BTC/USD", history_factory(), include_diagnostics=True)
+
+    assert result["top_strategy"] == expected_top_strategy
+    assert result["top_strategy"] in result["evaluated_strategy_scores"]
+    assert result["signals"]
+    assert result["signals"][0].strategy_key == expected_top_strategy
+
