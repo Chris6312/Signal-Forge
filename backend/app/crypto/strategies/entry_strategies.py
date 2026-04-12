@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 from datetime import datetime, timezone
-from typing import Optional
-from app.common.watchlist_schema_v4 import score_strategy_from_candles, compute_hint_bias, BotDecision, WEIGHTS, compute_features_for_signal, compute_strategy_score
+from app.common.watchlist_schema_v4 import score_strategy_from_candles, compute_features_for_signal, compute_strategy_score
 from app.common.signal_maturity import classify_signal_maturity, compute_breakout_extension_pct, compute_support_distance_pct
-import json
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_strategy_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.strip().lower().replace(" ", "_")
 
 
 def _signal_maturity_label(price: float, breakout_level: float, support_level: float, has_acceptance: bool) -> str:
@@ -68,6 +70,8 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
     trigger_type = "continuation"
     if strategy_key == "pullback_reclaim":
         trigger_type = "reclaim"
+    elif strategy_key == "failed_breakdown_reclaim":
+        trigger_type = "failed_breakdown_reclaim"
     elif strategy_key == "mean_reversion_bounce":
         trigger_type = "mean_reversion"
     elif strategy_key == "range_rotation":
@@ -107,6 +111,10 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
     price_in_retest_band = bool(recent_high and abs(current - recent_high) / max(abs(recent_high), 1.0) <= 0.015)
     fallback_stop = round((recent_low - atr * 0.5) if recent_low else current - atr * 0.5, 6)
     fallback_tp1 = round(current + atr * 1.5, 6)
+    breakout_acceptance_confirmed = None
+    support_extension_pct = None
+
+    strategy_specific_reasoning: dict[str, object] = {}
 
     # Separate the 4H patterns so they do not share the same interpretation.
     if strategy_key == "range_rotation":
@@ -121,6 +129,14 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         price_in_retest_band = False
         fallback_stop = round(range_low - atr * 0.5, 6)
         fallback_tp1 = round(min(range_high, current + atr * 1.5), 6)
+        strategy_specific_reasoning.update(
+            {
+                "range_low_30": round(range_low, 6) if range_low else None,
+                "range_high_30": round(range_high, 6) if range_high else None,
+                "range_mid_30": round(range_mid, 6) if range_mid else None,
+                "distance_from_low_pct": round(distance_from_low_pct, 3),
+            }
+        )
 
     elif strategy_key == "breakout_retest":
         lookback = 40 if len(highs) >= 41 else max(12, len(highs) - 1)
@@ -144,6 +160,15 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
             and (previous_close > breakout_anchor or current > previous_close)
         )
         support_extension_pct = round(((current - ema20[-1]) / max(ema20[-1], 1e-6)) * 100.0, 3) if ema20 else None
+        strategy_specific_reasoning.update(
+            {
+                "prior_high_40": round(prior_high, 6) if prior_high else None,
+                "breakout_high_10": round(breakout_high, 6) if breakout_high else None,
+                "retest_low": round(retest_low, 6) if retest_low else None,
+                "breakout_acceptance_confirmed": breakout_acceptance_confirmed,
+                "support_extension_pct": support_extension_pct,
+            }
+        )
 
     reasoning = {
         "signal_schema_version": "v2",
@@ -179,40 +204,8 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         reasoning["signal_maturity"] = _signal_maturity_label(current, breakout_anchor, ema20[-1] if ema20 else 0.0, breakout_acceptance_confirmed)
     elif strategy_key == "trend_continuation":
         reasoning["signal_maturity"] = _signal_maturity_label(current, recent_high, ema20[-1] if ema20 else 0.0, current > recent_high and current > (ema20[-1] if ema20 else 0.0))
+    reasoning.update(strategy_specific_reasoning)
     reasoning.update(_execution_readiness_metadata(strategy_key, reasoning))
-
-    if strategy_key == "range_rotation":
-        range_lookback = 30 if len(highs) >= 31 else max(5, len(highs) - 1)
-        range_high = max(highs[-range_lookback:-1]) if len(highs) > 1 else current
-        range_low = min(lows[-range_lookback:-1]) if len(lows) > 1 else current
-        range_mid = (range_high + range_low) / 2.0 if range_high and range_low else current
-        range_width = max(range_high - range_low, 1e-6)
-        distance_from_low_pct = ((current - range_low) / range_width) * 100.0 if range_width else 50.0
-
-        reasoning.update(
-            {
-                "range_low_30": round(range_low, 6) if range_low else None,
-                "range_high_30": round(range_high, 6) if range_high else None,
-                "range_mid_30": round(range_mid, 6) if range_mid else None,
-                "distance_from_low_pct": round(distance_from_low_pct, 3),
-            }
-        )
-
-    elif strategy_key == "breakout_retest":
-        lookback = 40 if len(highs) >= 41 else max(12, len(highs) - 1)
-        prior_high = max(highs[-lookback:-10]) if len(highs) >= 12 else recent_high
-        breakout_high = max(highs[-10:-1]) if len(highs) >= 11 else recent_high
-        retest_low = min(lows[-4:-1]) if len(lows) >= 5 else recent_low
-
-        reasoning.update(
-            {
-                "prior_high_40": round(prior_high, 6) if prior_high else None,
-                "breakout_high_10": round(breakout_high, 6) if breakout_high else None,
-                "retest_low": round(retest_low, 6) if retest_low else None,
-                "breakout_acceptance_confirmed": breakout_acceptance_confirmed,
-                "support_extension_pct": support_extension_pct,
-            }
-        )
     return EntrySignal(
         strategy=strategy_name,
         symbol=symbol,
@@ -268,9 +261,9 @@ class EntrySignal:
             "Mean Reversion Bounce": "mean_reversion_bounce",
             "Range Rotation Reversal": "range_rotation",
             "Breakout Retest Hold": "breakout_retest",
-            "Failed Breakdown Reclaim": "pullback_reclaim",
+            "Failed Breakdown Reclaim": "failed_breakdown_reclaim",
         }
-        return mapping.get(self.strategy, self.strategy.strip().lower().replace(" ", "_"))
+        return mapping.get(self.strategy, _normalize_strategy_key(self.strategy) or self.strategy)
 
 
 def _strategy_specific_bonus(strategy_key: str, signal: EntrySignal) -> float:
@@ -301,6 +294,10 @@ def _strategy_specific_bonus(strategy_key: str, signal: EntrySignal) -> float:
         if reasoning.get("price_in_retest_band"):
             bonus += 0.10
         if reasoning.get("breakout_acceptance_confirmed"):
+            bonus += 0.08
+
+    elif strategy_key == "failed_breakdown_reclaim":
+        if reasoning.get("reclaim_confirmed"):
             bonus += 0.08
 
     elif strategy_key == "mean_reversion_bounce":
@@ -764,6 +761,8 @@ STRONG_SIGNAL_THRESHOLD = 0.60
 
 def _strategy_name_to_key(name: str) -> str | None:
     if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
+        if "Failed Breakdown Reclaim" in name:
+            return "failed_breakdown_reclaim"
         return "pullback_reclaim"
 
     if "Momentum Breakout Continuation" in name:
@@ -779,7 +778,7 @@ def _strategy_name_to_key(name: str) -> str | None:
     if "Breakout Retest Hold" in name:
         return "breakout_retest"
 
-    return None
+    return _normalize_strategy_key(name)
 
 
 def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
@@ -844,7 +843,8 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
             logger.error("Strategy %s failed for %s: %s", strat.name, symbol, e)
 
     key_map = {
-        "pullback_reclaim": ["Pullback Reclaim", "Failed Breakdown Reclaim"],
+        "pullback_reclaim": ["Pullback Reclaim"],
+        "failed_breakdown_reclaim": ["Failed Breakdown Reclaim"],
         "trend_continuation": ["Momentum Breakout Continuation"],
         "mean_reversion_bounce": ["Mean Reversion Bounce"],
 

@@ -260,7 +260,6 @@ class StockMonitor:
 
         trading_mode = await runtime_state.get_trading_mode()
         risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
-        risk_pct *= regime_engine.stock_policy.size_multiplier
         is_paper = trading_mode == "paper"
 
         quantity = 0.0

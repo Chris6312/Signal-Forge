@@ -11,8 +11,8 @@ from app.common.portfolio_exposure import (
     compute_symbol_concentration_multiplier,
     compute_symbol_concentration_ratio,
 )
-from app.common.regime_aggressiveness import compute_regime_aggressiveness_multiplier
 from app.common.risk_config import normalize_asset_class, resolve_baseline_atr_percent, resolve_risk_per_trade_pct
+from app.regime.policy import compute_regime_size_multiplier
 
 
 logger = logging.getLogger(__name__)
@@ -81,8 +81,16 @@ def _coerce_non_negative_float(value) -> float | None:
     return result
 
 
-def _resolve_volatility_multiplier(entry_value: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None, asset: str | None = None) -> tuple[float, str]:
-    volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
+def _resolve_volatility_multiplier(
+    entry_value: float,
+    volatility_pct: float | None = None,
+    signal=None,
+    reasoning: dict | None = None,
+    asset: str | None = None,
+    volatility_value: float | None = None,
+) -> tuple[float, str]:
+    if volatility_value is None:
+        volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
     reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
     atr_value = reasoning_map.get("atr") or reasoning_map.get("atr_14") or reasoning_map.get("atr_recent")
 
@@ -140,12 +148,12 @@ def _extract_volatility_pct(entry_price: float, volatility_pct: float | None = N
     return None
 
 
-def _resolve_regime_aggressiveness_multiplier(signal=None, reasoning: dict | None = None) -> float:
+def _resolve_regime_size_multiplier(asset: str, signal=None, reasoning: dict | None = None) -> float:
     reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
     regime_value = getattr(signal, "regime", None)
     if regime_value is None and isinstance(reasoning_map, dict):
         regime_value = reasoning_map.get("regime")
-    return compute_regime_aggressiveness_multiplier(regime_value)
+    return compute_regime_size_multiplier(asset, regime_value)
 
 
 def compute_position_size(
@@ -181,14 +189,15 @@ def compute_position_size(
         return 0.0
 
     base_position_size = (equity_value * risk_pct_value) / stop_value
+    volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
     vol_multiplier, volatility_path = _resolve_volatility_multiplier(
         entry_value,
         volatility_pct=volatility_pct,
         signal=signal,
         reasoning=reasoning,
         asset=asset,
+        volatility_value=volatility_value,
     )
-    volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
     peak_value = float(peak_equity if peak_equity is not None else current_equity if current_equity is not None else equity_value)
     current_value = float(current_equity if current_equity is not None else equity_value)
     drawdown_pct = compute_drawdown_pct(current_value, peak_value)
@@ -211,7 +220,7 @@ def compute_position_size(
     cluster_multiplier = 1.0
     symbol_concentration_multiplier = 1.0
     portfolio_concentration_multiplier = 1.0
-    regime_multiplier = _resolve_regime_aggressiveness_multiplier(signal=signal, reasoning=reasoning)
+    regime_multiplier = _resolve_regime_size_multiplier(asset, signal=signal, reasoning=reasoning)
     if symbol and open_positions is not None:
         proposed_notional = base_position_size * vol_multiplier * dd_multiplier * entry_value
         cluster_multiplier = compute_cluster_exposure_multiplier(

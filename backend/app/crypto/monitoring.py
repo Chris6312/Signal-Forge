@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select, func
@@ -16,7 +15,7 @@ from app.common.runtime_state import runtime_state
 from app.common.redis_client import get_redis
 from app.common.ws_manager import ws_manager
 from app.crypto.kraken_client import kraken_client
-from app.crypto.strategies.entry_strategies import evaluate_all, _closed_ohlcv, _ema
+from app.crypto.strategies.entry_strategies import evaluate_all, _closed_ohlcv, _ema, _normalize_strategy_key
 from app.regime import regime_engine
 from app.regime.indicators import build_asset_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
@@ -39,9 +38,7 @@ def _extract_signals(result):
 
 
 def _strategy_key(value: str | None) -> str | None:
-    if not value:
-        return None
-    return value.strip().lower().replace(" ", "_")
+    return _normalize_strategy_key(value)
 
 
 def _signal_key(signal) -> str | None:
@@ -429,7 +426,6 @@ class CryptoMonitor:
 
         trading_mode = await runtime_state.get_trading_mode()
         risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
-        risk_pct *= regime_engine.crypto_policy.size_multiplier
         is_paper = trading_mode == "paper"
 
         quantity = 0.0

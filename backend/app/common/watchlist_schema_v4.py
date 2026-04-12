@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 from datetime import datetime, timezone
 
+from app.common.symbols import canonical_symbol
+
 # Centralized weights for scoring components (bounded and explicit)
 WEIGHTS = {
     "structure": 0.25,
@@ -40,16 +42,6 @@ class BotDecision:
     ai_hint_bias_applied: bool
     ai_hint_bias_amount: float
     feature_scores: Optional[Dict[str, Dict[str, float]]] = None
-
-
-def normalize_payload(payload: dict) -> dict:
-    # Backward-compatibility: if schema_version missing, mark as legacy
-    out = dict(payload)
-    if "schema_version" not in out:
-        out["schema_version"] = "legacy"
-    return out
-
-
 def validate_symbol_entry(item: dict) -> Optional[str]:
     # Minimal validation rules per requirements
     if "symbol" not in item:
@@ -60,8 +52,15 @@ def validate_symbol_entry(item: dict) -> Optional[str]:
     if ac not in ("stock", "crypto"):
         return f"unsupported asset_class: {ac}"
     if ac == "crypto":
-        s = item.get("symbol")
-        if "/" not in s:
+        canonical = canonical_symbol(item.get("symbol"), asset_class="crypto")
+        if not canonical:
+            return "missing symbol"
+        normalized = canonical.strip().upper()
+        if "/" in normalized:
+            base, quote = normalized.split("/", 1)
+            if not base.strip() or not quote.strip() or not base.strip().isalnum() or not quote.strip().isalnum():
+                return "crypto symbol must be in BASE/QUOTE format like BTC/USD"
+        elif not normalized.isalnum() or len(normalized) < 6:
             return "crypto symbol must be in BASE/QUOTE format like BTC/USD"
     if "ai_hint" in item and isinstance(item.get("ai_hint"), dict):
         strat = item["ai_hint"].get("suggested_strategy")
@@ -957,45 +956,6 @@ def _blend_weight_profile(strategy_key: str, regime: str | None) -> dict:
     for key in keys:
         blended[key] = float(profile.get(key, 0.0)) * 0.70 + float(regime_profile.get(key, 0.0)) * 0.30
     return blended
-
-
-def clamp_01(v: float) -> float:
-    return clamp01(v)
-
-
-def normalize_percent_distance(a: float, b: float) -> float:
-    try:
-        return clamp01(abs(a - b) / max(abs(b), 1.0))
-    except Exception:
-        return 0.0
-
-
-def normalize_slope(delta: float, price: float) -> float:
-    try:
-        return clamp01((delta / max(abs(price), 1.0)) * 5.0)
-    except Exception:
-        return 0.0
-
-
-def normalize_rr(entry: float, stop: float, tp: float) -> float:
-    try:
-        risk = max(1e-6, entry - stop)
-        reward = max(0.0, tp - entry)
-        if reward <= 0:
-            return 0.0
-        rr = reward / risk
-        return clamp01(min(1.0, rr / 3.0))
-    except Exception:
-        return 0.0
-
-
-def normalize_volume_expansion(curr_vol: float, prior_vol: float) -> float:
-    try:
-        if prior_vol <= 0:
-            return clamp01(curr_vol / max(1.0, curr_vol))
-        return clamp01((curr_vol - prior_vol) / prior_vol)
-    except Exception:
-        return 0.0
 
 
 def compute_strategy_score(strategy_key: str, features: dict, regime: str | None = None, asset_class: str = "stock") -> float:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 
 
@@ -10,16 +11,22 @@ DEFAULT_RISK_PER_TRADE_PCT: dict[str, float] = {
 
 DEFAULT_BASELINE_ATR_PERCENT_STOCK = 0.02
 DEFAULT_BASELINE_ATR_PERCENT_CRYPTO = 0.04
-DEFAULT_BASELINE_ATR_PERCENT = DEFAULT_BASELINE_ATR_PERCENT_STOCK
 
 
-def _coerce_float(value, default: float) -> float:
+def _coerce_float(value, default: float | None = None, *, finite_only: bool = False) -> float | None:
     try:
         if value is None or value == "":
-            return float(default)
-        return float(value)
+            result = None if default is None else float(default)
+        else:
+            result = float(value)
     except (TypeError, ValueError):
-        return float(default)
+        result = None if default is None else float(default)
+
+    if result is None:
+        return None
+    if finite_only and not math.isfinite(result):
+        return None
+    return result
 
 
 def normalize_asset_class(asset_class: str | None) -> str:

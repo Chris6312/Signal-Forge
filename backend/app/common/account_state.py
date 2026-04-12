@@ -16,16 +16,6 @@ def compute_drawdown_pct(current_equity: float, peak_equity: float) -> float:
     return max(0.0, (peak - current) / peak)
 
 
-def drawdown_multiplier(drawdown_pct: float) -> float:
-    if drawdown_pct < 0.03:
-        return 1.0
-    if drawdown_pct < 0.06:
-        return 0.75
-    if drawdown_pct <= 0.10:
-        return 0.50
-    return 0.25
-
-
 def should_block_new_entries(drawdown_pct: float) -> bool:
     return drawdown_pct > 0.15
 

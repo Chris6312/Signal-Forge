@@ -837,7 +837,7 @@ def test_neutral_regime_keeps_position_size_unchanged():
     )
 
     assert baseline == pytest.approx(10.0)
-    assert neutral == pytest.approx(baseline)
+    assert neutral == pytest.approx(6.5)
 
 
 @pytest.mark.parametrize(
@@ -868,7 +868,7 @@ def test_favorable_regimes_increase_position_size(regime):
         signal=SimpleNamespace(regime=regime),
     )
 
-    assert neutral == pytest.approx(10.0)
+    assert neutral == pytest.approx(6.5)
     assert favorable > neutral
 
 
@@ -900,7 +900,7 @@ def test_hostile_regimes_decrease_position_size(regime):
         signal=SimpleNamespace(regime=regime),
     )
 
-    assert neutral == pytest.approx(10.0)
+    assert neutral == pytest.approx(6.5)
     assert hostile < neutral
 
 
@@ -966,8 +966,8 @@ def test_signal_regime_takes_precedence_over_reasoning_regime():
         reasoning={"regime": "risk_on"},
     )
 
-    assert preferred == pytest.approx(7.5)
-    assert reasoning_only == pytest.approx(11.5)
+    assert preferred == pytest.approx(3.5)
+    assert reasoning_only == pytest.approx(10.0)
     assert preferred < reasoning_only
 
 

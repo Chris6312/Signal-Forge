@@ -50,6 +50,46 @@ STOCK_REGIME_POLICIES: dict[str, RegimePolicy] = {
     ),
 }
 
+
+def compute_regime_size_multiplier(asset_class: str | None, regime: str | None) -> float:
+    if not isinstance(regime, str):
+        return 1.0
+
+    normalized_regime = regime.strip().lower()
+    if not normalized_regime:
+        return 1.0
+
+    normalized_asset = (asset_class or "").strip().lower()
+    if normalized_asset == "crypto":
+        policy_key = {
+            "risk_on": "RISK_ON",
+            "bull_trend": "RISK_ON",
+            "neutral": "NEUTRAL",
+            "range_bound": "NEUTRAL",
+            "risk_off": "RISK_OFF",
+            "bear_trend": "RISK_OFF",
+            "panic": "RISK_OFF",
+        }.get(normalized_regime)
+        if policy_key:
+            return CRYPTO_REGIME_POLICIES[policy_key].size_multiplier
+        return 1.0
+
+    if normalized_asset == "stock":
+        policy_key = {
+            "risk_on": "RISK_ON",
+            "bull_trend": "RISK_ON",
+            "neutral": "NEUTRAL",
+            "range_bound": "NEUTRAL",
+            "risk_off": "RISK_OFF",
+            "bear_trend": "RISK_OFF",
+            "panic": "RISK_OFF",
+        }.get(normalized_regime)
+        if policy_key:
+            return STOCK_REGIME_POLICIES[policy_key].size_multiplier
+        return 1.0
+
+    return 1.0
+
 CRYPTO_REGIME_POLICIES: dict[str, RegimePolicy] = {
     "RISK_ON": RegimePolicy(
         allow_new_entries=True,

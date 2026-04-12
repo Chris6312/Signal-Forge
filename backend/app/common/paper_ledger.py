@@ -46,7 +46,8 @@ async def size_paper_position(
 
     current_equity = float(account.cash_balance or 0.0) + float(account.unrealized_pnl or 0.0)
     peak_equity = await get_peak_equity(asset_class, current_equity)
-    runtime_risk_override = await runtime_state.get_value(f"risk_per_trade_pct_{asset_class}", None)
+    runtime_key = "risk_per_trade_pct_crypto" if asset_class == "crypto" else "risk_per_trade_pct_stocks"
+    runtime_risk_override = await runtime_state.get_value(runtime_key, None)
     resolved_risk_pct = resolve_risk_per_trade_pct(
         asset_class,
         risk_per_trade_pct if risk_per_trade_pct is not None else runtime_risk_override,
