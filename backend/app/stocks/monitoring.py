@@ -109,12 +109,13 @@ class StockMonitor:
         if already_open:
             return
 
-        if not is_watchlist_activation_ready(ws.added_at):
+        fast_frame_info = self._store.frame_info(ws.symbol, TF_MINUTES["5m"])
+        if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["5m"], frame_info=fast_frame_info):
             logger.debug(
-                "%s added at %s is waiting for next 15m activation candle (ready at %s)",
+                "%s added at %s is waiting for next 5m activation candle (ready at %s)",
                 ws.symbol,
                 ws.added_at,
-                activation_ready_at(ws.added_at),
+                activation_ready_at(ws.added_at, fast_tf_minutes=TF_MINUTES["5m"]),
             )
             return
 

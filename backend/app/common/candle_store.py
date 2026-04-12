@@ -31,6 +31,7 @@ class _Frame:
     interval_minutes: int
     candles: list = field(default_factory=list)
     last_close_ts: float = 0.0   # Unix ts of the last complete candle's close (derived from data)
+    last_ingested_ts: float = 0.0 # Unix ts when the frame was last refreshed by the bot
     sequence_ok: bool = True
     incomplete: bool = False
     last_time_raw: str | None = None
@@ -137,6 +138,7 @@ class CandleStore:
             sequence_ok = False
 
         async with self._lock:
+            ingested_ts = datetime.now(timezone.utc).timestamp()
             key = (symbol, interval_minutes)
             frame = self._frames.get(key)
             if frame is None:
@@ -148,6 +150,7 @@ class CandleStore:
             frame.last_time_raw = last_time_raw
             if last_close_ts:
                 frame.last_close_ts = last_close_ts
+            frame.last_ingested_ts = ingested_ts
 
     def needs_refresh(self, symbol: str, interval_minutes: int) -> bool:
         """
@@ -185,15 +188,25 @@ class CandleStore:
     def frame_info(self, symbol: str, interval_minutes: int) -> dict:
         """Return metadata about a cached frame for debugging/monitoring.
 
-        Returns a dict with keys: count, sequence_ok, incomplete, last_time_raw.
+        Returns a dict with keys: count, sequence_ok, incomplete, last_time_raw,
+        last_close_ts, last_ingested_ts.
         If no frame present, count==0 and incomplete==True.
         """
         frame = self._frames.get((symbol, interval_minutes))
         if not frame:
-            return {"count": 0, "sequence_ok": False, "incomplete": True, "last_time_raw": None}
+            return {
+                "count": 0,
+                "sequence_ok": False,
+                "incomplete": True,
+                "last_time_raw": None,
+                "last_close_ts": 0.0,
+                "last_ingested_ts": 0.0,
+            }
         return {
             "count": len(frame.candles),
             "sequence_ok": bool(frame.sequence_ok),
             "incomplete": bool(frame.incomplete),
             "last_time_raw": frame.last_time_raw,
+            "last_close_ts": frame.last_close_ts,
+            "last_ingested_ts": frame.last_ingested_ts,
         }

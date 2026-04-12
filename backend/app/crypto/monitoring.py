@@ -109,12 +109,13 @@ class CryptoMonitor:
         if already_open:
             return
 
-        if not is_watchlist_activation_ready(ws.added_at):
+        fast_frame_info = self._store.frame_info(can, TF_MINUTES["15m"])
+        if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["15m"], frame_info=fast_frame_info):
             logger.debug(
                 "%s added at %s is waiting for next 15m activation candle (ready at %s)",
                 can,
                 ws.added_at,
-                activation_ready_at(ws.added_at),
+                activation_ready_at(ws.added_at, fast_tf_minutes=TF_MINUTES["15m"]),
             )
             return
 
