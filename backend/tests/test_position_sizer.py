@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from app.common.position_sizer import compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
 from app.common.portfolio_exposure import (
@@ -6,6 +7,7 @@ from app.common.portfolio_exposure import (
     compute_symbol_concentration_multiplier,
     compute_symbol_concentration_ratio,
 )
+from app.common.regime_aggressiveness import compute_regime_aggressiveness_multiplier
 from app.common.risk_config import resolve_baseline_atr_percent
 
 
@@ -647,3 +649,211 @@ def test_invalid_symbol_concentration_inputs_fall_back_safely():
     )
 
     assert malformed == pytest.approx(baseline)
+
+
+@pytest.mark.parametrize(
+    ("regime", "expected_multiplier"),
+    [
+        ("neutral", 1.0),
+        ("  NEUTRAL  ", 1.0),
+        ("risk_on", 1.15),
+        ("bull_trend", 1.10),
+        ("risk_off", 0.75),
+        ("bear_trend", 0.65),
+        ("panic", 0.50),
+        (None, 1.0),
+        ("unknown", 1.0),
+        (123, 1.0),
+    ],
+)
+def test_compute_regime_aggressiveness_multiplier_mapping_and_fallbacks(regime, expected_multiplier):
+    assert compute_regime_aggressiveness_multiplier(regime) == pytest.approx(expected_multiplier)
+
+
+def test_neutral_regime_keeps_position_size_unchanged():
+    baseline = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+    neutral = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert baseline == pytest.approx(10.0)
+    assert neutral == pytest.approx(baseline)
+
+
+@pytest.mark.parametrize(
+    "regime",
+    ["risk_on", "bull_trend"],
+)
+def test_favorable_regimes_increase_position_size(regime):
+    neutral = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+    favorable = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime=regime),
+    )
+
+    assert neutral == pytest.approx(10.0)
+    assert favorable > neutral
+
+
+@pytest.mark.parametrize(
+    "regime",
+    ["risk_off", "bear_trend", "panic"],
+)
+def test_hostile_regimes_decrease_position_size(regime):
+    neutral = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+    hostile = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime=regime),
+    )
+
+    assert neutral == pytest.approx(10.0)
+    assert hostile < neutral
+
+
+def test_unknown_or_missing_regime_is_neutral():
+    baseline = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+    unknown = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="mystery_mode"),
+    )
+    missing = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime=None),
+    )
+
+    assert unknown == pytest.approx(baseline)
+    assert missing == pytest.approx(baseline)
+
+
+def test_signal_regime_takes_precedence_over_reasoning_regime():
+    preferred = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        signal=SimpleNamespace(regime="risk_off", reasoning={"regime": "risk_on"}),
+    )
+    reasoning_only = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        reasoning={"regime": "risk_on"},
+    )
+
+    assert preferred == pytest.approx(7.5)
+    assert reasoning_only == pytest.approx(11.5)
+    assert preferred < reasoning_only
+
+
+def test_favorable_regime_does_not_resurrect_zero_size():
+    neutral_zero = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[{"symbol": "BTC/USD", "asset_class": "crypto", "market_value": 2500.0}],
+    )
+    favorable_zero = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[{"symbol": "BTC/USD", "asset_class": "crypto", "market_value": 2500.0}],
+        signal=SimpleNamespace(regime="risk_on"),
+    )
+
+    assert neutral_zero == 0.0
+    assert favorable_zero == 0.0

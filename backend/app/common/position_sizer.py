@@ -9,6 +9,7 @@ from app.common.portfolio_exposure import (
     compute_symbol_concentration_multiplier,
     compute_symbol_concentration_ratio,
 )
+from app.common.regime_aggressiveness import compute_regime_aggressiveness_multiplier
 from app.common.risk_config import normalize_asset_class, resolve_baseline_atr_percent, resolve_risk_per_trade_pct
 
 
@@ -91,6 +92,14 @@ def _extract_volatility_pct(entry_price: float, volatility_pct: float | None = N
             return max(0.0, float(volatility_pct))
         except (TypeError, ValueError):
             return 0.0
+
+
+def _resolve_regime_aggressiveness_multiplier(signal=None, reasoning: dict | None = None) -> float:
+    reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
+    regime_value = getattr(signal, "regime", None)
+    if regime_value is None and isinstance(reasoning_map, dict):
+        regime_value = reasoning_map.get("regime")
+    return compute_regime_aggressiveness_multiplier(regime_value)
 
     reasoning = reasoning or getattr(signal, "reasoning", None) or {}
     for key in ("volatility_pct", "atr_pct"):
@@ -189,6 +198,7 @@ def compute_position_size(
     dd_multiplier = compute_drawdown_risk_multiplier(drawdown_pct * 100.0)
     cluster_multiplier = 1.0
     symbol_concentration_multiplier = 1.0
+    regime_multiplier = _resolve_regime_aggressiveness_multiplier(signal=signal, reasoning=reasoning)
     if symbol and open_positions is not None:
         proposed_notional = base_position_size * vol_multiplier * dd_multiplier * entry_value
         cluster_multiplier = compute_cluster_exposure_multiplier(
@@ -206,7 +216,15 @@ def compute_position_size(
         )
         symbol_concentration_multiplier = compute_symbol_concentration_multiplier(concentration_ratio)
 
-    final_size = max(0.0, base_position_size * vol_multiplier * dd_multiplier * cluster_multiplier * symbol_concentration_multiplier)
+    final_size = max(
+        0.0,
+        base_position_size
+        * vol_multiplier
+        * dd_multiplier
+        * cluster_multiplier
+        * symbol_concentration_multiplier
+        * regime_multiplier,
+    )
 
     if max_notional_pct is not None:
         try:
@@ -233,6 +251,7 @@ def compute_position_size(
         "dd_multiplier": dd_multiplier,
         "cluster_multiplier": cluster_multiplier,
         "symbol_concentration_multiplier": symbol_concentration_multiplier,
+        "regime_multiplier": regime_multiplier,
         "final_size": final_size,
     }
     logger.debug("position_sizer=%s", debug_payload)
