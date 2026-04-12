@@ -657,7 +657,7 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
             candidate.reasoning["raw_signal_present"] = sig is not None
 
             feature_scores = compute_features_for_signal(key, candidate, asset_class="crypto")
-            base_score = score_strategy_from_candles(key, feature_scores)
+            base_score = score_strategy_from_candles(key, feature_scores, regime=getattr(candidate, "regime", None), asset_class="crypto")
 
             logger.debug(
                 "CRYPTO_SCORE_DEBUG | %s | %s | feature_scores=%s | base_score_raw=%r | threshold_raw=%r | raw_signal_present=%s | passes=%s",

@@ -238,3 +238,105 @@ def test_crypto_breakout_retest_requires_real_retest_context():
     score_without_retest = compute_strategy_score("breakout_retest", without_retest, regime="trending_up", asset_class="crypto")
 
     assert score_with_retest > score_without_retest
+
+
+def test_crypto_breakout_retest_outscores_range_rotation_on_retest_setup():
+    class S: pass
+    s = S()
+    s.entry_price = 105.0
+    s.initial_stop = 101.0
+    s.profit_target_1 = 111.0
+    s.regime = "trending_up"
+    s.reasoning = {
+        "signal_schema_version": "v2",
+        "ema9": 104.8,
+        "ema20": 104.0,
+        "ema50": 102.5,
+        "ema200": 98.0,
+        "ema20_past": 102.9,
+        "ema20_history": [102.8, 103.0, 103.3, 103.7, 104.0],
+        "current_vs_ema20": 1.0,
+        "breakout_pct": 1.8,
+        "volume_ratio": 1.4,
+        "higher_highs_confirmed": True,
+        "higher_lows_confirmed": True,
+        "higher_closes_confirmed": True,
+        "trigger_type": "breakout",
+        "atr": 1.2,
+        "prior_high_40": 103.5,
+        "breakout_high_10": 106.0,
+        "retest_low": 103.7,
+        "price_in_retest_band": True,
+        "raw_signal_present": True,
+    }
+    features = compute_features_for_signal("breakout_retest", s, asset_class="crypto")
+    breakout_retest = compute_strategy_score("breakout_retest", features, regime="trending_up", asset_class="crypto")
+    range_rotation = compute_strategy_score("range_rotation", features, regime="trending_up", asset_class="crypto")
+    assert breakout_retest > range_rotation
+
+
+def test_stock_opening_range_breakout_scores_above_pullback_on_orb_setup():
+    class S: pass
+    s = S()
+    s.entry_price = 108.0
+    s.initial_stop = 104.0
+    s.profit_target_1 = 114.0
+    s.regime = "trending_up"
+    s.reasoning = {
+        "signal_schema_version": "v2",
+        "ema9": 107.6,
+        "ema20": 106.9,
+        "ema50": 104.8,
+        "ema200": 100.5,
+        "ema20_past": 105.8,
+        "ema20_history": [105.2, 105.5, 105.9, 106.4, 106.9],
+        "current_vs_ema20": 1.1,
+        "breakout_pct": 3.2,
+        "volume_ratio": 1.7,
+        "higher_highs_confirmed": True,
+        "higher_lows_confirmed": True,
+        "higher_closes_confirmed": True,
+        "trigger_type": "breakout",
+        "atr": 1.4,
+        "opening_range_high": 104.5,
+        "opening_range_low": 100.8,
+        "bars_in_session": 5,
+        "raw_signal_present": True,
+    }
+    features = compute_features_for_signal("opening_range_breakout", s, asset_class="stock")
+    opening_range = compute_strategy_score("opening_range_breakout", features, regime="trending_up", asset_class="stock")
+    pullback = compute_strategy_score("pullback_reclaim", features, regime="trending_up", asset_class="stock")
+    assert opening_range > pullback
+
+
+def test_wrong_regime_mean_reversion_is_suppressed():
+    class S: pass
+    s = S()
+    s.entry_price = 95.0
+    s.initial_stop = 92.0
+    s.profit_target_1 = 99.0
+    s.regime = "trending_up"
+    s.reasoning = {
+        "signal_schema_version": "v2",
+        "ema9": 95.5,
+        "ema20": 95.2,
+        "ema50": 94.8,
+        "ema200": 92.0,
+        "ema20_past": 95.1,
+        "ema20_history": [95.0, 95.1, 95.15, 95.18, 95.2],
+        "current_vs_ema20": -0.2,
+        "breakout_pct": -0.4,
+        "volume_ratio": 0.9,
+        "higher_highs_confirmed": False,
+        "higher_lows_confirmed": False,
+        "higher_closes_confirmed": False,
+        "trigger_type": "mean_reversion",
+        "atr": 1.0,
+        "bounce_confirmed": True,
+        "raw_signal_present": True,
+    }
+    features = compute_features_for_signal("mean_reversion_bounce", s, asset_class="stock")
+    mean_reversion = compute_strategy_score("mean_reversion_bounce", features, regime="trending_up", asset_class="stock")
+    trend_continuation = compute_strategy_score("trend_continuation", features, regime="trending_up", asset_class="stock")
+    assert trend_continuation == pytest.approx(0.0)
+    assert mean_reversion < 0.10

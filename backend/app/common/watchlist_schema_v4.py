@@ -260,6 +260,33 @@ def _regime_fit_from_regime_and_strategy(regime: str | None, strategy_key: str) 
             return 0.05
         return 0.20
 
+    if strategy_key == "opening_range_breakout":
+        if regime == "trending_up":
+            return 1.0
+        if regime == "ranging":
+            return 0.40
+        if regime == "trending_down":
+            return 0.05
+        return 0.20
+
+    if strategy_key == "volatility_compression_breakout":
+        if regime == "trending_up":
+            return 0.95
+        if regime == "ranging":
+            return 0.35
+        if regime == "trending_down":
+            return 0.05
+        return 0.20
+
+    if strategy_key == "failed_breakdown_reclaim":
+        if regime == "trending_down":
+            return 0.90
+        if regime == "ranging":
+            return 0.70
+        if regime == "trending_up":
+            return 0.15
+        return 0.30
+
     # Pullback / reclaim longs work best in healthy uptrends,
     # but can still function somewhat in ranges.
     if strategy_key == "pullback_reclaim":
@@ -676,21 +703,166 @@ def compute_features_for_signal(strategy_key: str, signal, asset_class: str = "s
     }
     return {k: clamp01(v) if k != "_diagnostics" else v for k, v in features.items()}
 
-def score_strategy_from_candles(strategy: str, features: dict) -> float:
-    """Compute a normalized 0..1-ish score from candle-derived features only.
+CRYPTO_STRATEGY_WEIGHTS = {
+    "pullback_reclaim": {
+        "structure": 0.22,
+        "trend": 0.28,
+        "momentum": 0.07,
+        "trigger": 0.20,
+        "volume": 0.06,
+        "risk_reward": 0.05,
+        "maturity": 0.12,
+    },
+    "trend_continuation": {
+        "structure": 0.08,
+        "trend": 0.24,
+        "momentum": 0.32,
+        "trigger": 0.08,
+        "volume": 0.18,
+        "risk_reward": 0.03,
+        "maturity": 0.07,
+    },
+    "breakout_retest": {
+        "structure": 0.24,
+        "trend": 0.14,
+        "momentum": 0.05,
+        "trigger": 0.24,
+        "volume": 0.15,
+        "risk_reward": 0.10,
+        "maturity": 0.08,
+    },
+    "mean_reversion_bounce": {
+        "structure": 0.33,
+        "trend": 0.04,
+        "momentum": 0.24,
+        "trigger": 0.12,
+        "volume": 0.04,
+        "risk_reward": 0.13,
+        "maturity": 0.10,
+    },
+    "range_rotation": {
+        "structure": 0.20,
+        "trend": 0.02,
+        "momentum": 0.08,
+        "trigger": 0.24,
+        "volume": 0.03,
+        "risk_reward": 0.28,
+        "maturity": 0.05,
+    },
+}
 
-    `features` is a pre-computed dict of normalized sub-scores (0..1)
-    keyed by the same component names used in WEIGHTS.
-    """
-    s = 0.0
-    for k, w in WEIGHTS.items():
-        s += float(features.get(k, 0.0)) * float(w)
-    # Ensure bounded between 0 and 1
-    if s < 0:
-        s = 0.0
-    if s > 1.0:
-        s = 1.0
-    return s
+STOCK_STRATEGY_WEIGHTS = {
+    "pullback_reclaim": {
+        "structure": 0.22,
+        "trend": 0.28,
+        "momentum": 0.07,
+        "trigger": 0.20,
+        "volume": 0.05,
+        "risk_reward": 0.05,
+        "maturity": 0.13,
+    },
+    "failed_breakdown_reclaim": {
+        "structure": 0.24,
+        "trend": 0.05,
+        "momentum": 0.16,
+        "trigger": 0.21,
+        "volume": 0.05,
+        "risk_reward": 0.19,
+        "maturity": 0.10,
+    },
+    "trend_continuation": {
+        "structure": 0.10,
+        "trend": 0.24,
+        "momentum": 0.28,
+        "trigger": 0.09,
+        "volume": 0.17,
+        "risk_reward": 0.04,
+        "maturity": 0.08,
+    },
+    "mean_reversion_bounce": {
+        "structure": 0.34,
+        "trend": 0.04,
+        "momentum": 0.24,
+        "trigger": 0.11,
+        "volume": 0.05,
+        "risk_reward": 0.12,
+        "maturity": 0.10,
+    },
+    "opening_range_breakout": {
+        "structure": 0.15,
+        "trend": 0.18,
+        "momentum": 0.20,
+        "trigger": 0.22,
+        "volume": 0.15,
+        "risk_reward": 0.05,
+        "maturity": 0.05,
+    },
+    "volatility_compression_breakout": {
+        "structure": 0.18,
+        "trend": 0.18,
+        "momentum": 0.17,
+        "trigger": 0.20,
+        "volume": 0.15,
+        "risk_reward": 0.07,
+        "maturity": 0.05,
+    },
+}
+
+
+def _strategy_weight_matrix(strategy_key: str, asset_class: str) -> dict[str, float]:
+    if asset_class == "crypto":
+        return dict(CRYPTO_STRATEGY_WEIGHTS.get(strategy_key, WEIGHTS))
+    return dict(STOCK_STRATEGY_WEIGHTS.get(strategy_key, WEIGHTS))
+
+
+def _feature_component_map(features: dict) -> dict[str, float]:
+    return {
+        "structure": clamp01(float(features.get("structure", 0.0) or 0.0)),
+        "trend": clamp01(float(features.get("trend_alignment", 0.0) or 0.0)),
+        "momentum": clamp01(float(features.get("momentum", 0.0) or 0.0)),
+        "trigger": clamp01(float(features.get("reclaim_or_breakout", 0.0) or 0.0)),
+        "volume": clamp01(float(features.get("volume", 0.0) or 0.0)),
+        "risk_reward": clamp01(float(features.get("risk_reward", 0.0) or 0.0)),
+        "maturity": clamp01(1.0 - float(features.get("trend_maturity_penalty", 0.0) or 0.0)),
+        "regime_fit": clamp01(float(features.get("regime_fit", 0.0) or 0.0)),
+    }
+
+
+def _regime_gate(strategy_key: str, regime_fit: float) -> float:
+    if strategy_key in {"mean_reversion_bounce", "range_rotation"}:
+        if regime_fit >= 0.90:
+            return 1.0
+        if regime_fit >= 0.60:
+            return 0.70
+        if regime_fit >= 0.30:
+            return 0.20
+        return 0.0
+
+    if strategy_key in {"failed_breakdown_reclaim"}:
+        if regime_fit >= 0.85:
+            return 1.0
+        if regime_fit >= 0.55:
+            return 0.55
+        if regime_fit >= 0.20:
+            return 0.15
+        return 0.0
+
+    if regime_fit >= 0.80:
+        return 1.0
+    if regime_fit >= 0.50:
+        return 0.60
+    if regime_fit >= 0.20:
+        return 0.12
+    return 0.0
+
+
+def _legacy_regime_profile(regime: str | None) -> dict[str, float] | None:
+    return WEIGHTS_BY_REGIME.get((regime or "").upper())
+
+
+def score_strategy_from_candles(strategy: str, features: dict, regime: str | None = None, asset_class: str = "stock") -> float:
+    """Compute a normalized score from candle-derived features using an explicit matrix."""
+    return compute_strategy_score(strategy, features, regime=regime, asset_class=asset_class)
 
 
 # Regime-aware weight profiles
@@ -827,122 +999,60 @@ def normalize_volume_expansion(curr_vol: float, prior_vol: float) -> float:
 
 
 def compute_strategy_score(strategy_key: str, features: dict, regime: str | None = None, asset_class: str = "stock") -> float:
-    """Compute a calibrated score using strategy-specific weights and penalties.
+    """Compute a normalized score using an explicit per-strategy matrix."""
+    matrix = _strategy_weight_matrix(strategy_key, asset_class)
+    components = _feature_component_map(features)
 
-    The goal is not to make every bullish chart score highly everywhere.
-    Each strategy should earn points for the behavior it is specifically
-    designed to trade.
-    """
-    profile = _blend_weight_profile(strategy_key, regime)
+    score = 0.0
+    for component, weight in matrix.items():
+        score += components.get(component, 0.0) * float(weight)
 
-    s = 0.0
-    for k, w in profile.items():
-        s += float(features.get(k, 0.0) or 0.0) * float(w)
-    s = max(0.0, min(1.0, s))
+    regime_fit = components.get("regime_fit", 0.0)
+    gate = _regime_gate(strategy_key, regime_fit)
+    score *= gate
 
-    maturity_penalty = float(features.get("trend_maturity_penalty", 0.0) or 0.0)
-    trigger = float(features.get("reclaim_or_breakout", 0.0) or 0.0)
-    risk_reward = float(features.get("risk_reward", 0.0) or 0.0)
-    regime_fit = float(features.get("regime_fit", 0.0) or 0.0)
     diagnostics = features.get("_diagnostics", {}) or {}
+    if not bool(diagnostics.get("raw_signal_present", False)):
+        score *= 0.92
 
-    raw_signal_present = bool(diagnostics.get("raw_signal_present", False))
-    price_in_retest_band = bool(diagnostics.get("price_in_retest_band", False))
-    strong_trend_persistence = bool(diagnostics.get("strong_trend_persistence", False))
-    near_range_low_score = float(diagnostics.get("near_range_low_score", 0.0) or 0.0)
-    breakout_retest_quality = float(diagnostics.get("breakout_retest_quality", 0.0) or 0.0)
-    breakout_strength = float(diagnostics.get("breakout_strength", 0.0) or 0.0)
-    compression_quality = float(diagnostics.get("compression_quality", 0.0) or 0.0)
+    legacy_profile = _legacy_regime_profile(regime)
+    if legacy_profile:
+        legacy_score = 0.0
+        for key, weight in legacy_profile.items():
+            component_key = {
+                "trend_alignment": "trend",
+                "reclaim_or_breakout": "trigger",
+                "regime_fit": "regime_fit",
+            }.get(key, key)
+            legacy_score += components.get(component_key, 0.0) * float(weight)
+        score = (score * 0.85) + (legacy_score * 0.15)
 
-    if strategy_key == "trend_continuation":
-        s -= maturity_penalty * 0.32
-        if price_in_retest_band:
-            s -= 0.03
-        if trigger < 0.45:
-            s -= 0.04
-        if not raw_signal_present:
-            s *= 0.82
+    setup_bonus = 0.0
+    trigger = components.get("trigger", 0.0)
+    volume = components.get("volume", 0.0)
+    structure = components.get("structure", 0.0)
+    momentum = components.get("momentum", 0.0)
+    risk_reward = components.get("risk_reward", 0.0)
 
+    if strategy_key in {"opening_range_breakout", "volatility_compression_breakout"}:
+        setup_bonus += trigger * 0.05 + volume * 0.03
+        if strategy_key == "volatility_compression_breakout":
+            setup_bonus += structure * 0.02
     elif strategy_key == "breakout_retest":
-        s -= maturity_penalty * 0.24
-        s += breakout_retest_quality * 0.10
-        if not price_in_retest_band:
-            s *= 0.72
-        if breakout_strength < 0.12:
-            s -= 0.06
-        if not raw_signal_present:
-            s *= 0.75
-
-    elif strategy_key == "range_rotation":
-        s -= maturity_penalty * 0.08
-        if strong_trend_persistence:
-            s *= 0.52
-        if near_range_low_score < 0.45:
-            s *= 0.60
-        if regime_fit < 0.60:
-            s *= 0.82
-        if trigger < 0.45 or risk_reward < 0.30:
-            s *= 0.75
-        if not raw_signal_present:
-            s *= 0.70
-
-    elif strategy_key == "opening_range_breakout":
-        s -= maturity_penalty * 0.22
-        if breakout_strength < 0.15:
-            s -= 0.05
-        if not raw_signal_present:
-            s *= 0.76
-
-    elif strategy_key == "volatility_compression_breakout":
-        s -= maturity_penalty * 0.18
-        s += compression_quality * 0.08
-        if compression_quality < 0.45:
-            s *= 0.78
-        if not raw_signal_present:
-            s *= 0.74
-
+        setup_bonus += trigger * 0.04 + structure * 0.02
     elif strategy_key == "failed_breakdown_reclaim":
-        s -= maturity_penalty * 0.12
-        if trigger < 0.45:
-            s *= 0.80
-        if not raw_signal_present:
-            s *= 0.78
-
-    elif strategy_key == "pullback_reclaim":
-        s -= maturity_penalty * 0.18
-        if not raw_signal_present:
-            s *= 0.84
-
+        setup_bonus += trigger * 0.05 + risk_reward * 0.03
     elif strategy_key == "mean_reversion_bounce":
-        s -= maturity_penalty * 0.10
-        if not raw_signal_present:
-            s *= 0.82
+        setup_bonus += structure * 0.03 + momentum * 0.03
+    elif strategy_key == "range_rotation":
+        setup_bonus += risk_reward * 0.03
 
-    elif strategy_key == "range_breakout":
-        s -= maturity_penalty * 0.28
-        if not raw_signal_present:
-            s *= 0.80
-
-    s = max(0.0, min(1.0, s))
-
-    calibration = {
-        "trend_continuation": (0.08, 0.84),
-        "pullback_reclaim": (0.05, 0.80),
-        "mean_reversion_bounce": (0.05, 0.74),
-        "breakout_retest": (0.05, 0.82),
-        "range_rotation": (0.02, 0.68),
-        "opening_range_breakout": (0.05, 0.81),
-        "volatility_compression_breakout": (0.05, 0.80),
-        "failed_breakdown_reclaim": (0.05, 0.78),
-        "range_breakout": (0.05, 0.80),
-    }
-    low, high = calibration.get(strategy_key, (0.0, 1.0))
-    calibrated = low + s * (high - low)
+    score += setup_bonus
 
     if asset_class == "crypto":
-        calibrated = calibrated * 0.95 + 0.05
+        score = min(1.0, score * 1.05 + 0.005)
 
-    return max(0.0, min(1.0, calibrated))
+    return max(0.0, min(1.0, score))
 
 def build_bot_decision(evaluated: Dict[str, float], ai_hint: Optional[dict]) -> BotDecision:
     # Select best by score (deterministic tie-breaker by sorted strategy name)

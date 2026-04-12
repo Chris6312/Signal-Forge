@@ -805,7 +805,7 @@ def evaluate_all(
             candidate.reasoning["raw_signal_present"] = raw_signal is not None
 
             feature_scores = compute_features_for_signal(key, candidate, asset_class="stock")
-            base_score = score_strategy_from_candles(key, feature_scores)
+            base_score = score_strategy_from_candles(key, feature_scores, regime=getattr(candidate, "regime", None), asset_class="stock")
             candidate.confidence = max(
                 getattr(candidate, "confidence", 0.0) or 0.0,
                 round(base_score, 6),
