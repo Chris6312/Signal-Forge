@@ -280,9 +280,17 @@ def test_include_diagnostics_adds_crypto_execution_readiness_metadata():
     result = evaluate_all("BTC/USD", base, include_diagnostics=True)
     breakout = next(sig for sig in result["signals"] if sig.strategy == "Breakout Retest Hold")
 
+    assert "signal_maturity" in breakout.reasoning
     assert "execution_ready" in breakout.reasoning
     assert "execution_confidence_cap" in breakout.reasoning
     assert "execution_block_reason" in breakout.reasoning
+
+
+def test_crypto_signal_maturity_is_exposed_for_trend_continuation_payload():
+    result = evaluate_all("BTC/USD", trending_up_ohlcv(65), include_diagnostics=True)
+    signal = next(sig for sig in result["signals"] if sig.strategy_key == "trend_continuation")
+
+    assert "signal_maturity" in signal.reasoning
 
 
 def test_crypto_execution_readiness_requires_acceptance_and_fast_support_stability():
@@ -345,6 +353,82 @@ def test_crypto_execution_readiness_suppresses_stretched_reclaim_and_continuatio
     assert weak_reclaim["execution_block_reason"] == "reclaim_not_accepted"
     assert stretched_continuation["execution_ready"] is False
     assert stretched_continuation["execution_block_reason"] == "continuation_too_extended"
+
+
+@pytest.mark.parametrize(
+    ("strategy_key", "reasoning", "expected_ready", "expected_block_reason"),
+    [
+        (
+            "breakout_retest",
+            {
+                "close": 104.0,
+                "previous_close": 103.5,
+                "current_vs_ema20": 0.04,
+                "reclaim_confirmed": True,
+                "breakout_acceptance_confirmed": True,
+                "support_extension_pct": 1.0,
+                "breakout_pct": 1.0,
+                "higher_closes_confirmed": True,
+                "three_ascending_closes": True,
+                "signal_maturity": "confirmed",
+            },
+            True,
+            None,
+        ),
+        (
+            "breakout_retest",
+            {
+                "close": 104.0,
+                "previous_close": 103.5,
+                "current_vs_ema20": 0.04,
+                "reclaim_confirmed": True,
+                "breakout_acceptance_confirmed": True,
+                "support_extension_pct": 1.0,
+                "breakout_pct": 1.0,
+                "higher_closes_confirmed": True,
+                "three_ascending_closes": True,
+                "signal_maturity": "early",
+            },
+            False,
+            "signal_maturity_early",
+        ),
+        (
+            "trend_continuation",
+            {
+                "close": 104.0,
+                "previous_close": 103.5,
+                "current_vs_ema20": 0.04,
+                "support_extension_pct": 1.0,
+                "higher_highs_confirmed": True,
+                "higher_lows_confirmed": True,
+                "breakout_pct": 1.0,
+                "signal_maturity": "confirmed",
+            },
+            True,
+            None,
+        ),
+        (
+            "trend_continuation",
+            {
+                "close": 104.0,
+                "previous_close": 103.5,
+                "current_vs_ema20": 0.04,
+                "support_extension_pct": 1.0,
+                "higher_highs_confirmed": True,
+                "higher_lows_confirmed": True,
+                "breakout_pct": 1.0,
+                "signal_maturity": "extended",
+            },
+            False,
+            "signal_maturity_extended",
+        ),
+    ],
+)
+def test_crypto_signal_maturity_overrides_execution_readiness(strategy_key, reasoning, expected_ready, expected_block_reason):
+    adjustment = _execution_readiness_metadata(strategy_key, reasoning)
+
+    assert adjustment["execution_ready"] is expected_ready
+    assert adjustment["execution_block_reason"] == expected_block_reason
 
 
 def _crypto_breakout_retest_history():

@@ -102,6 +102,7 @@ class TestOpeningRangeBreakout:
         assert signal.initial_stop < 215.0
         assert signal.profit_target_1 > 215.0
         assert signal.profit_target_2 > signal.profit_target_1
+        assert "signal_maturity" in signal.reasoning
 
     def test_returns_none_when_below_recent_high(self):
         history = trending_up_history(65, start=100.0, end=200.0)
@@ -160,6 +161,7 @@ class TestTrendContinuationLadder:
         assert signal is not None
         assert isinstance(signal, StockEntrySignal)
         assert signal.entry_price > 0.0
+        assert "signal_maturity" in signal.reasoning
 
     def test_returns_none_for_trending_down(self):
         assert self.strategy.evaluate("AAPL", trending_down_history(65)) is None
@@ -222,6 +224,16 @@ class TestEvaluateAll:
         assert evaluate_all("AAPL", []) == []
 
 
+def test_stock_volatility_compression_breakout_exposes_signal_maturity_in_reasoning():
+    history = [make_bar(100.0 + (i % 2) * 8.0, spread=0.05) for i in range(20)]
+    history.extend(make_bar(100.0 + (i % 2) * 0.1, spread=0.001) for i in range(9))
+    history.append(make_bar(103.0, spread=0.002))
+    signal = VolatilityCompressionBreakout().evaluate("AAPL", history)
+
+    assert signal is not None
+    assert "signal_maturity" in signal.reasoning
+
+
 def test_include_diagnostics_top_strategy_matches_top_signal():
     base = trending_up_history(64, start=100.0, end=199.0)
     base.append(make_bar(215.0, spread=0.002))
@@ -268,6 +280,127 @@ def test_ai_hint_bias_applied_and_capped(caplog):
 # ---------------------------------------------------------------------------
 
 class TestExecutionReadinessAdjustment:
+    @pytest.mark.parametrize(
+        ("signal", "history", "expected_ready", "expected_block_reason"),
+        [
+            (
+                StockEntrySignal(
+                    strategy="Opening Range Breakout",
+                    symbol="AAPL",
+                    entry_price=103.8,
+                    initial_stop=100.0,
+                    profit_target_1=110.0,
+                    profit_target_2=115.0,
+                    regime="trending_up",
+                    confidence=0.92,
+                    reasoning={
+                        "opening_range_high": 103.4,
+                        "recent_high_20": 103.4,
+                    "opening_range_acceptance_confirmed": True,
+                        "signal_maturity": "confirmed",
+                    },
+                ),
+                {"5m": trending_up_history(20, start=100.0, end=103.8)},
+                True,
+                None,
+            ),
+            (
+                StockEntrySignal(
+                    strategy="Opening Range Breakout",
+                    symbol="AAPL",
+                    entry_price=103.8,
+                    initial_stop=100.0,
+                    profit_target_1=110.0,
+                    profit_target_2=115.0,
+                    regime="trending_up",
+                    confidence=0.92,
+                    reasoning={
+                        "opening_range_high": 103.4,
+                        "recent_high_20": 103.4,
+                    "opening_range_acceptance_confirmed": True,
+                        "signal_maturity": "early",
+                    },
+                ),
+                {"5m": trending_up_history(20, start=100.0, end=103.8)},
+                False,
+                "signal_maturity_early",
+            ),
+            (
+                StockEntrySignal(
+                    strategy="Volatility Compression Breakout",
+                    symbol="AAPL",
+                    entry_price=103.8,
+                    initial_stop=100.0,
+                    profit_target_1=110.0,
+                    profit_target_2=115.0,
+                    regime="trending_up",
+                    confidence=0.92,
+                    reasoning={
+                        "compression_high_10": 103.4,
+                        "compression_low_10": 99.0,
+                        "compression_acceptance_confirmed": True,
+                        "signal_maturity": "extended",
+                    },
+                ),
+                {"5m": trending_up_history(20, start=100.0, end=103.8)},
+                False,
+                "signal_maturity_extended",
+            ),
+            (
+                StockEntrySignal(
+                    strategy="Trend Continuation Ladder",
+                    symbol="AAPL",
+                    entry_price=102.0,
+                    initial_stop=98.0,
+                    profit_target_1=108.0,
+                    profit_target_2=112.0,
+                    regime="trending_up",
+                    confidence=0.92,
+                    reasoning={
+                        "higher_highs_confirmed": True,
+                        "higher_lows_confirmed": True,
+                        "higher_closes_confirmed": True,
+                        "signal_maturity": "confirmed",
+                    },
+                ),
+                {"5m": trending_up_history(20, start=100.0, end=102.0)},
+                True,
+                None,
+            ),
+            (
+                StockEntrySignal(
+                    strategy="Trend Continuation Ladder",
+                    symbol="AAPL",
+                    entry_price=102.0,
+                    initial_stop=98.0,
+                    profit_target_1=108.0,
+                    profit_target_2=112.0,
+                    regime="trending_up",
+                    confidence=0.92,
+                    reasoning={
+                        "higher_highs_confirmed": True,
+                        "higher_lows_confirmed": True,
+                        "higher_closes_confirmed": True,
+                        "signal_maturity": "early",
+                    },
+                ),
+                {"5m": trending_up_history(20, start=100.0, end=102.0)},
+                False,
+                "signal_maturity_early",
+            ),
+        ],
+    )
+    def test_signal_maturity_overrides_readiness_for_breakout_and_continuation_strategies(
+        self,
+        signal,
+        history,
+        expected_ready,
+        expected_block_reason,
+    ):
+        adjustment = _execution_readiness_adjustment(signal, history)
+
+        assert adjustment["execution_ready"] is expected_ready
+        assert adjustment["block_reason"] == expected_block_reason
     def test_opening_range_breakout_is_blocked_when_too_extended(self):
         signal = StockEntrySignal(
             strategy="Opening Range Breakout",
