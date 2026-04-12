@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from app.api.routes.monitoring import _select_top_signal, _strategy_key
 from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal
@@ -85,6 +85,7 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
     create_position = AsyncMock()
     monkeypatch.setattr(monitor, "_create_position", create_position)
     monkeypatch.setattr("app.stocks.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
     monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: [])
 
@@ -92,6 +93,85 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
 
     assert create_position.await_count == 1
     assert create_position.await_args.args[2] is second
+
+
+@pytest.mark.asyncio
+async def test_stock_monitor_evaluates_once_per_new_5m_trigger_candle(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="AAPL", added_at=None)
+    signal = SimpleNamespace(
+        strategy="pullback_reclaim",
+        strategy_key="pullback_reclaim",
+        confidence=0.91,
+        entry_price=100.0,
+        initial_stop=95.0,
+        profit_target_1=105.0,
+        profit_target_2=110.0,
+        max_hold_hours=24,
+        regime="neutral",
+    )
+
+    current_ts = {"value": 100.0}
+    evaluate_all = MagicMock(return_value={"signals": [signal], "top_strategy": "pullback_reclaim", "top_confidence": 0.91})
+    monkeypatch.setattr("app.stocks.monitoring.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.stocks.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.stocks.monitoring.can_enter_trade", lambda: True)
+    monkeypatch.setattr("app.stocks.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    monkeypatch.setattr(monitor, "_create_position", AsyncMock())
+    monkeypatch.setattr("app.stocks.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: current_ts["value"])
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {"last_close_ts": current_ts["value"]})
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: [])
+
+    await monitor._evaluate_symbol(db, ws)
+    await monitor._evaluate_symbol(db, ws)
+
+    current_ts["value"] = 200.0
+    await monitor._evaluate_symbol(db, ws)
+
+    assert evaluate_all.call_count == 2
+    assert monitor._create_position.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_crypto_monitor_evaluates_once_per_new_15m_trigger_candle(monkeypatch):
+    monitor = CryptoMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="BTC/USD", added_at=None)
+    signal = SimpleNamespace(
+        strategy="trend_continuation",
+        strategy_key="trend_continuation",
+        confidence=0.91,
+        reasoning={"execution_ready": True, "execution_confidence_cap": 0.91, "execution_block_reason": None},
+    )
+
+    current_ts = {"value": 100.0}
+    evaluate_all = MagicMock(return_value={"signals": [signal], "top_strategy": "trend_continuation", "top_confidence": 0.91})
+    monkeypatch.setattr("app.crypto.monitoring.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.crypto.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "app.crypto.monitoring.get_redis",
+        AsyncMock(return_value=SimpleNamespace(setnx=AsyncMock(return_value=True), expire=AsyncMock(), exists=AsyncMock(return_value=False), delete=AsyncMock())),
+    )
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    monkeypatch.setattr(monitor, "_create_position", AsyncMock())
+    monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: current_ts["value"])
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {"last_close_ts": current_ts["value"]})
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_ohlcv(30, start=100.0, end=120.0))
+
+    await monitor._evaluate_symbol(db, ws)
+    await monitor._evaluate_symbol(db, ws)
+
+    current_ts["value"] = 200.0
+    await monitor._evaluate_symbol(db, ws)
+
+    assert evaluate_all.call_count == 2
+    assert monitor._create_position.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -120,6 +200,7 @@ async def test_crypto_monitor_blocks_breakout_retest_when_lower_timeframe_reclai
     create_position = AsyncMock()
     monkeypatch.setattr(monitor, "_create_position", create_position)
     monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
     monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_down_ohlcv(30, start=120.0, end=90.0))
 
@@ -154,6 +235,7 @@ async def test_crypto_monitor_caps_pullback_reclaim_until_true_reclaim_confirmed
     create_position = AsyncMock()
     monkeypatch.setattr(monitor, "_create_position", create_position)
     monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
 
     pullback = trending_up_ohlcv(30, start=100.0, end=110.0)
@@ -221,6 +303,7 @@ async def test_crypto_monitor_uses_backend_top_strategy_for_execution(monkeypatc
     create_position = AsyncMock()
     monkeypatch.setattr(monitor, "_create_position", create_position)
     monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
     monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: [])
 

@@ -175,6 +175,7 @@ class CryptoMonitor:
     def __init__(self):
         self._store = CandleStore()
         self._fetcher = CryptoCandleFetcher(self._store)
+        self._last_trigger_eval_close_ts: dict[str, float] = {}
 
     async def run(self):
         await runtime_state.update_worker_status("crypto_monitor", "running")
@@ -236,6 +237,20 @@ class CryptoMonitor:
         except Exception as exc:
             logger.warning("Regime refresh failed: %s", exc)
 
+    def _trigger_close_ts(self, symbol: str) -> float:
+        return self._store.latest_close_ts(symbol, TF_MINUTES["15m"])
+
+    def _should_evaluate_trigger(self, symbol: str) -> bool:
+        trigger_close_ts = self._trigger_close_ts(symbol)
+        if trigger_close_ts <= 0:
+            return False
+        return self._last_trigger_eval_close_ts.get(symbol) != trigger_close_ts
+
+    def _mark_trigger_evaluated(self, symbol: str) -> None:
+        trigger_close_ts = self._trigger_close_ts(symbol)
+        if trigger_close_ts > 0:
+            self._last_trigger_eval_close_ts[symbol] = trigger_close_ts
+
     async def _evaluate_symbol(self, db, ws: WatchlistSymbol):
         can = canonical_symbol(ws.symbol, asset_class=ASSET_CLASS)
         already_open = await self._has_open_position(db, can)
@@ -243,6 +258,9 @@ class CryptoMonitor:
             return
 
         fast_frame_info = self._store.frame_info(can, TF_MINUTES["15m"])
+        if not self._should_evaluate_trigger(can):
+            return
+
         if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["15m"], frame_info=fast_frame_info):
             logger.debug(
                 "%s added at %s is waiting for next 15m activation candle (ready at %s)",
@@ -272,6 +290,8 @@ class CryptoMonitor:
                 return
         except Exception as exc:
             logger.warning("Cooldown check failed for %s: %s", can, exc)
+
+        self._mark_trigger_evaluated(can)
 
         candles_by_tf = {
             "15m":   self._store.get(can, TF_MINUTES["15m"]),

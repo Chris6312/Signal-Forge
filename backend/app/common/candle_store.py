@@ -56,6 +56,13 @@ class CandleStore:
         frame = self._frames.get((symbol, interval_minutes))
         return frame.candles if frame else []
 
+    def latest_close_ts(self, symbol: str, interval_minutes: int) -> float:
+        """Return the latest cached closed-candle timestamp for a frame."""
+        frame = self._frames.get((symbol, interval_minutes))
+        if not frame:
+            return 0.0
+        return float(frame.last_close_ts or 0.0)
+
     async def update(self, symbol: str, interval_minutes: int, candles: list) -> None:
         """Replace cached candles and stamp the current candle-close timestamp."""
         if not candles:

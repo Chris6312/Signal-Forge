@@ -67,6 +67,7 @@ class StockMonitor:
     def __init__(self):
         self._store = CandleStore()
         self._fetcher = StockCandleFetcher(self._store)
+        self._last_trigger_eval_close_ts: dict[str, float] = {}
 
     async def run(self):
         await runtime_state.update_worker_status("stock_monitor", "running")
@@ -137,12 +138,29 @@ class StockMonitor:
         except Exception as exc:
             logger.warning("Regime refresh failed: %s", exc)
 
+    def _trigger_close_ts(self, symbol: str) -> float:
+        return self._store.latest_close_ts(symbol, TF_MINUTES["5m"])
+
+    def _should_evaluate_trigger(self, symbol: str) -> bool:
+        trigger_close_ts = self._trigger_close_ts(symbol)
+        if trigger_close_ts <= 0:
+            return False
+        return self._last_trigger_eval_close_ts.get(symbol) != trigger_close_ts
+
+    def _mark_trigger_evaluated(self, symbol: str) -> None:
+        trigger_close_ts = self._trigger_close_ts(symbol)
+        if trigger_close_ts > 0:
+            self._last_trigger_eval_close_ts[symbol] = trigger_close_ts
+
     async def _evaluate_symbol(self, db, ws: WatchlistSymbol):
         already_open = await self._has_open_position(db, ws.symbol)
         if already_open:
             return
 
         fast_frame_info = self._store.frame_info(ws.symbol, TF_MINUTES["5m"])
+        if not self._should_evaluate_trigger(ws.symbol):
+            return
+
         if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["5m"], frame_info=fast_frame_info):
             logger.debug(
                 "%s added at %s is waiting for next 5m activation candle (ready at %s)",
@@ -159,6 +177,8 @@ class StockMonitor:
                 return
         except Exception as exc:
             logger.warning("Cooldown check failed for %s: %s", ws.symbol, exc)
+
+        self._mark_trigger_evaluated(ws.symbol)
 
         candles_by_tf = {
             "1m":    self._store.get(ws.symbol, TF_MINUTES["1m"]),
