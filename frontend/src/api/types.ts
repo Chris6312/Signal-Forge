@@ -126,6 +126,8 @@ export interface EventTypesResponse {
 export interface RuntimeState {
   market_open: boolean
   halted?: boolean
+  risk_per_trade_pct_stocks?: number
+  risk_per_trade_pct_crypto?: number
   [key: string]: unknown
 }
 

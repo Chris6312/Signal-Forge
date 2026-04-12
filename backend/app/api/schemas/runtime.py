@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class RuntimeStateOut(BaseModel):
@@ -7,7 +7,8 @@ class RuntimeStateOut(BaseModel):
     crypto_trading_enabled: bool
     stock_trading_enabled: bool
     trading_mode: str = "paper"
-    risk_per_trade_pct: float = 0.005
+    risk_per_trade_pct_stocks: float = 0.005
+    risk_per_trade_pct_crypto: float = 0.004
     max_crypto_positions: int
     max_stock_positions: int
     crypto_monitor: str
@@ -20,10 +21,13 @@ class RuntimeStateOut(BaseModel):
 
 
 class RuntimeUpdateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     trading_enabled: bool | None = None
     crypto_trading_enabled: bool | None = None
     stock_trading_enabled: bool | None = None
     trading_mode: str | None = None
-    risk_per_trade_pct: float | None = None
+    risk_per_trade_pct_stocks: float | None = None
+    risk_per_trade_pct_crypto: float | None = None
     max_crypto_positions: int | None = None
     max_stock_positions: int | None = None

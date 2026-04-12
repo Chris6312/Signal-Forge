@@ -13,7 +13,8 @@ interface RuntimeState {
   crypto_trading_enabled: boolean
   stock_trading_enabled: boolean
   trading_mode: string
-  risk_per_trade_pct: number
+  risk_per_trade_pct_stocks: number
+  risk_per_trade_pct_crypto: number
   max_crypto_positions: number
   max_stock_positions: number
   crypto_monitor: string
@@ -35,6 +36,8 @@ function stockStatus(raw: string, ms: MarketStatusResponse['status']): string {
 export default function RuntimeRisk() {
   const qc = useQueryClient()
   const [adminToken, setAdminToken] = useState('')
+  const [riskStocks, setRiskStocks] = useState('')
+  const [riskCrypto, setRiskCrypto] = useState('')
   const [maxCrypto, setMaxCrypto] = useState('')
   const [maxStock, setMaxStock] = useState('')
   const [cryptoSeed, setCryptoSeed] = useState('')
@@ -151,6 +154,8 @@ export default function RuntimeRisk() {
 
   const handleUpdate = () => {
     const body: Record<string, number> = {}
+    if (riskStocks) body.risk_per_trade_pct_stocks = parseFloat(riskStocks) / 100
+    if (riskCrypto) body.risk_per_trade_pct_crypto = parseFloat(riskCrypto) / 100
     if (maxCrypto) body.max_crypto_positions = parseInt(maxCrypto)
     if (maxStock) body.max_stock_positions = parseInt(maxStock)
     if (Object.keys(body).length === 0) return
@@ -227,7 +232,8 @@ export default function RuntimeRisk() {
               </span>
             } />
             
-            <Row label="Risk Threshold (Per Vector)" value={<span className="mono text-white bg-[#12141f] border border-surface-border px-2 py-0.5 rounded shadow-card-inset">{((data?.risk_per_trade_pct ?? 0.02) * 100).toFixed(1)}%</span>} />
+            <Row label="Risk Threshold (Stocks)" value={<span className="mono text-white bg-[#12141f] border border-surface-border px-2 py-0.5 rounded shadow-card-inset">{((data?.risk_per_trade_pct_stocks ?? 0.005) * 100).toFixed(1)}%</span>} />
+            <Row label="Risk Threshold (Crypto)" value={<span className="mono text-white bg-[#12141f] border border-surface-border px-2 py-0.5 rounded shadow-card-inset">{((data?.risk_per_trade_pct_crypto ?? 0.004) * 100).toFixed(1)}%</span>} />
             <Row label="Global Trading" value={<StatusBadge status={data?.trading_enabled ? 'ACTIVE' : 'INACTIVE'} showRaw />} />
             <Row label="Node_A Execution (Crypto)" value={<StatusBadge status={data?.crypto_trading_enabled ? 'ACTIVE' : 'INACTIVE'} showRaw />} />
             
@@ -410,6 +416,14 @@ export default function RuntimeRisk() {
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-gray-500 mono">RISK_STOCKS (%)</label>
+                      <input type="number" step="0.1" min="0" value={riskStocks} onChange={e => setRiskStocks(e.target.value)} placeholder={((data?.risk_per_trade_pct_stocks ?? 0.005) * 100).toFixed(1)} className="w-full bg-surface border border-surface-border rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-brand transition-all" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-gray-500 mono">RISK_CRYPTO (%)</label>
+                      <input type="number" step="0.1" min="0" value={riskCrypto} onChange={e => setRiskCrypto(e.target.value)} placeholder={((data?.risk_per_trade_pct_crypto ?? 0.004) * 100).toFixed(1)} className="w-full bg-surface border border-surface-border rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-brand transition-all" />
+                    </div>
                     <div className="space-y-1">
                       <label className="text-[9px] text-gray-500 mono">MAX_CRYPTO</label>
                       <input type="number" value={maxCrypto} onChange={e => setMaxCrypto(e.target.value)} placeholder={String(data?.max_crypto_positions ?? 5)} className="w-full bg-surface border border-surface-border rounded py-1.5 px-2 text-white font-mono text-xs focus:outline-none focus:border-brand transition-all" />

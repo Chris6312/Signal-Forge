@@ -41,7 +41,8 @@ def get_default_risk_per_trade_pct(asset_class: str | None = None) -> float:
 def resolve_risk_per_trade_pct(asset_class: str | None = None, runtime_override=None) -> float:
     if isinstance(runtime_override, dict):
         asset = normalize_asset_class(asset_class)
-        value = runtime_override.get(asset)
+        key = "risk_per_trade_pct_crypto" if asset == "crypto" else "risk_per_trade_pct_stocks"
+        value = runtime_override.get(key)
         if value is None:
             value = runtime_override.get(f"risk_per_trade_pct_{asset}")
         if value is None:
