@@ -12,6 +12,7 @@ from app.common.models.position import Position, PositionState
 from app.common.models.watchlist import SymbolState, WatchlistSymbol
 from app.common.redis_client import get_redis
 from app.common.symbols import canonical_symbol
+from app.common.watchlist_activation import activation_ready_at, is_watchlist_activation_ready
 from app.regime import regime_engine
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ def _normalize_eval_result(result) -> dict:
             signals = []
         return {
             "signals": signals,
+            "top_strategy": result.get("top_strategy"),
+            "top_confidence": result.get("top_confidence"),
             "evaluated_strategy_scores": dict(result.get("evaluated_strategy_scores", {}) or {}),
             "evaluated_strategies": dict(result.get("evaluated_strategies", {}) or {}),
             "rejected_strategies": dict(result.get("rejected_strategies", {}) or {}),
@@ -35,6 +38,8 @@ def _normalize_eval_result(result) -> dict:
     if isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
         return {
             "signals": list(result),
+            "top_strategy": None,
+            "top_confidence": None,
             "evaluated_strategy_scores": {},
             "evaluated_strategies": {},
             "rejected_strategies": {},
@@ -44,6 +49,8 @@ def _normalize_eval_result(result) -> dict:
 
     return {
         "signals": [],
+        "top_strategy": None,
+        "top_confidence": None,
         "evaluated_strategy_scores": {},
         "evaluated_strategies": {},
         "rejected_strategies": {},
@@ -169,6 +176,10 @@ async def get_monitoring_candidates(
             logger.debug("Cooldown lookup failed for %s: %s", ws.symbol, exc)
 
         try:
+            if not is_watchlist_activation_ready(ws.added_at):
+                ready_at = activation_ready_at(ws.added_at)
+                blocked_reason = f"awaiting_activation_candle_until:{ready_at.isoformat()}" if ready_at else "awaiting_activation_candle"
+
             if sig_obj:
                 try:
                     stmt_count = select(func.count()).select_from(Position).where(
@@ -182,7 +193,7 @@ async def get_monitoring_candidates(
                 try:
                     allowed, reason = regime_engine.can_open(ws.asset_class, sig_obj.strategy, sig_obj.confidence, current_count)
                     regime_allowed = allowed
-                    if not allowed:
+                    if not allowed and not blocked_reason:
                         blocked_reason = reason
                 except Exception as exc:
                     logger.debug("Regime check failed for %s: %s", ws.symbol, exc)
@@ -198,8 +209,8 @@ async def get_monitoring_candidates(
             "state": ws.state,
             "added_at": ws.added_at.isoformat() if ws.added_at else None,
             "watchlist_source_id": ws.watchlist_source_id,
-            "top_strategy": sig_obj.strategy if sig_obj else None,
-            "top_confidence": sig_obj.confidence if sig_obj else None,
+            "top_strategy": (sig.get("top_strategy") if isinstance(sig, dict) else None) or (sig_obj.strategy if sig_obj else None),
+            "top_confidence": (sig.get("top_confidence") if isinstance(sig, dict) else None) or (sig_obj.confidence if sig_obj else None),
             "top_entry": sig_obj.entry_price if sig_obj else None,
             "blocked_reason": blocked_reason,
             "has_open_position": has_open_position,
@@ -220,6 +231,8 @@ async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
         "symbol": can,
         "asset_class": asset_class,
         "signals": [],
+        "top_strategy": None,
+        "top_confidence": None,
         "evaluated_strategy_scores": {},
         "evaluated_strategies": {},
         "rejected_strategies": {},
@@ -272,6 +285,8 @@ async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
 
         normalized = _normalize_eval_result(raw_result)
         result["signals"] = [_serialize_signal(signal) for signal in normalized["signals"]]
+        result["top_strategy"] = normalized["top_strategy"]
+        result["top_confidence"] = normalized["top_confidence"]
         result["evaluated_strategy_scores"] = normalized["evaluated_strategy_scores"]
         result["evaluated_strategies"] = normalized["evaluated_strategies"]
         result["rejected_strategies"] = normalized["rejected_strategies"]

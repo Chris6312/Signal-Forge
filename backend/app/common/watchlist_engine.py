@@ -141,6 +141,9 @@ class WatchlistEngine:
                 ws = existing_managed[key]
                 ws.state = SymbolState.ACTIVE
                 ws.watchlist_source_id = source_id
+                ws.added_at = now
+                ws.removed_at = None
+                ws.managed_since = None
                 if meta.get("reason"):
                     ws.reason = meta["reason"]
                 if meta.get("confidence") is not None:

@@ -825,8 +825,6 @@ def evaluate_all(
         except Exception as exc:
             logger.error("Stock strategy %s error for %s: %s", strategy.name, symbol, exc)
 
-    signals.sort(key=lambda s: s.confidence, reverse=True)
-
     key_map = {
         "pullback_reclaim": ["Pullback Reclaim"],
         "failed_breakdown_reclaim": ["Failed Breakdown Reclaim"],
@@ -926,6 +924,22 @@ def evaluate_all(
         feature_scores={k: v.get("feature_scores") for k, v in evaluated.items()},
     )
 
+    for summary in strategy_summaries.values():
+        strategy_key = summary["key"]
+        signal = summary["signal"]
+        selected_eval = evaluated.get(strategy_key)
+        if not selected_eval or not selected_eval.get("valid"):
+            continue
+        signal.confidence = float(selected_eval["final_score"])
+
+    signals = [
+        summary["signal"]
+        for summary in strategy_summaries.values()
+        if evaluated.get(summary["key"], {}).get("valid")
+        and float(evaluated[summary["key"]]["final_score"]) >= round(MIN_SCORE_THRESHOLD, 6)
+    ]
+    signals.sort(key=lambda s: s.confidence, reverse=True)
+
     audit_payload = {
         "schema_version": payload_meta.get("schema_version") if payload_meta else None,
         "source": payload_meta.get("source") if payload_meta else None,
@@ -1000,6 +1014,8 @@ def evaluate_all(
     if include_diagnostics:
         return {
             "signals": signals,
+            "top_strategy": decision.selected_strategy,
+            "top_confidence": decision.selected_score,
             "evaluated_strategy_scores": decision.evaluated_strategies,
             "evaluated_strategies": {
                 k: {

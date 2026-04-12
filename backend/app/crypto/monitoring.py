@@ -22,6 +22,7 @@ from app.regime.indicators import build_asset_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
 from app.crypto.candle_fetcher import CryptoCandleFetcher
 from app.common.symbols import canonical_symbol
+from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,15 @@ class CryptoMonitor:
         can = canonical_symbol(ws.symbol, asset_class=ASSET_CLASS)
         already_open = await self._has_open_position(db, can)
         if already_open:
+            return
+
+        if not is_watchlist_activation_ready(ws.added_at):
+            logger.debug(
+                "%s added at %s is waiting for next 15m activation candle (ready at %s)",
+                can,
+                ws.added_at,
+                activation_ready_at(ws.added_at),
+            )
             return
 
         # Prevent duplicate entry intents across concurrent monitor loops

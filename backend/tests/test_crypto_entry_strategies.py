@@ -260,3 +260,15 @@ class TestEvaluateAll:
     def test_does_not_raise_on_empty_ohlcv(self):
         result = evaluate_all("BTC/USD", [])
         assert result == []
+
+
+def test_include_diagnostics_top_strategy_matches_top_signal():
+    base = trending_up_ohlcv(64, start=100.0, end=199.0)
+    base.append(make_candle(64, 215.0, spread=0.002))
+    result = evaluate_all("BTC/USD", base, include_diagnostics=True)
+    assert result["top_strategy"] in result["evaluated_strategy_scores"]
+    assert result["top_confidence"] == pytest.approx(result["evaluated_strategy_scores"][result["top_strategy"]])
+    if result["signals"]:
+        top_signal = result["signals"][0]
+        assert top_signal.confidence == pytest.approx(result["top_confidence"])
+

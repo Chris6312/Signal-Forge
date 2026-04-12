@@ -87,6 +87,7 @@ interface EvalResult {
   evaluated_strategy_scores?: Record<string, number>
   evaluated_strategies?: Record<string, StrategyEvaluation>
   top_strategy?: string | null
+  top_confidence?: number | null
 }
 
 interface StrategyDiagnosticCardData {
@@ -122,7 +123,7 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
   const regimeFallback = result.signals[0]?.regime ?? null
 
   if (result.evaluated_strategy_scores && Object.keys(result.evaluated_strategy_scores).length > 0) {
-    return Object.entries(result.evaluated_strategy_scores)
+    const cards = Object.entries(result.evaluated_strategy_scores)
       .map(([strategyKey, confidence]) => ({
         strategyKey,
         strategyLabel: STRATEGY_KEY_TO_LABEL[strategyKey] ?? strategyKey,
@@ -134,9 +135,15 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
           false,
       }))
       .sort((a, b) => b.confidence - a.confidence)
+
+    if (!cards.some((card) => card.selected) && cards.length > 0) {
+      cards[0].selected = true
+    }
+
+    return cards
   }
 
-  return result.signals
+  const cards = result.signals
     .map((sig) => {
       const strategyKey = sig.strategy_key ?? inferStrategyKey(sig.strategy)
       const evaluation: StrategyEvaluation | undefined =
@@ -158,10 +165,18 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
         confidence: sig.confidence,
         regime: sig.regime,
         evaluation,
-        selected: false,
+        selected:
+          (result.top_strategy && inferStrategyKey(result.top_strategy) === strategyKey) ||
+          false,
       }
     })
     .sort((a, b) => b.confidence - a.confidence)
+
+  if (!cards.some((card) => card.selected) && cards.length > 0) {
+    cards[0].selected = true
+  }
+
+  return cards
 }
 
 export default function Monitoring() {

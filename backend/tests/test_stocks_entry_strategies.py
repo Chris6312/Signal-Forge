@@ -220,6 +220,18 @@ class TestEvaluateAll:
         assert evaluate_all("AAPL", []) == []
 
 
+def test_include_diagnostics_top_strategy_matches_top_signal():
+    base = trending_up_history(64, start=100.0, end=199.0)
+    base.append(make_bar(215.0, spread=0.002))
+    result = evaluate_all("AAPL", base, include_diagnostics=True)
+    assert result["top_strategy"] in result["evaluated_strategy_scores"]
+    assert result["top_confidence"] == pytest.approx(result["evaluated_strategy_scores"][result["top_strategy"]])
+    if result["signals"]:
+        top_signal = result["signals"][0]
+        assert top_signal.confidence == pytest.approx(result["top_confidence"])
+
+
+
 def test_ai_hint_bias_applied_and_capped(caplog):
     # Build a history that yields a PullbackReclaim signal
     base = trending_up_history(56, start=100.0, end=180.0)

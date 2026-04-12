@@ -21,6 +21,7 @@ from app.common.market_hours import can_enter_trade, market_status
 from app.regime import regime_engine
 from app.regime.indicators import build_asset_indicators, build_vix_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
+from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
 from app.stocks.candle_fetcher import StockCandleFetcher
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,15 @@ class StockMonitor:
     async def _evaluate_symbol(self, db, ws: WatchlistSymbol):
         already_open = await self._has_open_position(db, ws.symbol)
         if already_open:
+            return
+
+        if not is_watchlist_activation_ready(ws.added_at):
+            logger.debug(
+                "%s added at %s is waiting for next 15m activation candle (ready at %s)",
+                ws.symbol,
+                ws.added_at,
+                activation_ready_at(ws.added_at),
+            )
             return
 
         try:

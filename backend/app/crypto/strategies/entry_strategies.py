@@ -686,8 +686,6 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
         except Exception as e:
             logger.error("Strategy %s failed for %s: %s", strat.name, symbol, e)
 
-    signals.sort(key=lambda s: s.confidence, reverse=True)
-
     key_map = {
         "pullback_reclaim": ["Pullback Reclaim", "Failed Breakdown Reclaim"],
         "trend_continuation": ["Momentum Breakout Continuation"],
@@ -730,9 +728,38 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
                 "feature_scores": {},
             }
 
+    best_key = None
+    for key, payload in evaluated.items():
+        if not payload["valid"]:
+            continue
+        if best_key is None or payload["final_score"] > evaluated[best_key]["final_score"] or (
+            payload["final_score"] == evaluated[best_key]["final_score"] and key < best_key
+        ):
+            best_key = key
+
+    for summary in strategy_summaries.values():
+        strategy_key = summary["key"]
+        signal = summary["signal"]
+        selected_eval = evaluated.get(strategy_key)
+        if not selected_eval or not selected_eval.get("valid"):
+            continue
+        signal.confidence = float(selected_eval["final_score"])
+
+    signals = [
+        summary["signal"]
+        for summary in strategy_summaries.values()
+        if evaluated.get(summary["key"], {}).get("valid")
+        and float(evaluated[summary["key"]]["final_score"]) >= round(MIN_SCORE_THRESHOLD, 6)
+    ]
+    signals.sort(key=lambda s: s.confidence, reverse=True)
+
+    selected_score = float(evaluated[best_key]["final_score"]) if best_key else 0.0
+
     audit_payload = {
         "symbol": symbol,
         "asset_class": "crypto",
+        "bot_selected_strategy": best_key,
+        "bot_selected_score": selected_score,
         "evaluated_strategy_scores": {k: v["final_score"] for k, v in evaluated.items()},
         "evaluated_strategies": evaluated,
         "rejected_strategies": {k: v["reason"] for k, v in evaluated.items() if not v["valid"]},
@@ -744,6 +771,8 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
     if include_diagnostics:
         return {
             "signals": signals,
+            "top_strategy": best_key,
+            "top_confidence": selected_score,
             "evaluated_strategy_scores": audit_payload["evaluated_strategy_scores"],
             "evaluated_strategies": audit_payload["evaluated_strategies"],
             "rejected_strategies": audit_payload["rejected_strategies"],
