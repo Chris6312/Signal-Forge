@@ -23,6 +23,16 @@ class PositionOut(BaseModel):
     hours_held: float | None = None
     hold_ratio: float | None = None
     time_risk_state: str | None = None
+    protection_mode: str | None = None
+    initial_risk_price: float | None = None
+    tp1_price: float | None = None
+    tp1_hit: bool | None = None
+    break_even_floor: float | None = None
+    promoted_floor: float | None = None
+    highest_promoted_floor: float | None = None
+    runner_phase: str | None = None
+    milestone_version: str | None = None
+    last_protection_update_at: datetime | None = None
     regime_at_entry: str | None = None
     watchlist_source_id: str | None = None
     management_policy_version: str | None = None
