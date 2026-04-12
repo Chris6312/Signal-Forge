@@ -44,6 +44,25 @@ def _volatility_multiplier(volatility_pct: float) -> float:
     return 0.35
 
 
+def _resolve_volatility_multiplier(entry_value: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None, asset: str | None = None) -> tuple[float, str]:
+    volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
+    reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
+    atr_value = reasoning_map.get("atr") or reasoning_map.get("atr_14") or reasoning_map.get("atr_recent")
+
+    if atr_value is not None:
+        try:
+            vol_multiplier = compute_volatility_multiplier(
+                atr=float(atr_value),
+                price=entry_value,
+                baseline_atr_percent=resolve_baseline_atr_percent(asset),
+            )
+            return vol_multiplier, "atr"
+        except (TypeError, ValueError):
+            pass
+
+    return _volatility_multiplier(volatility_value), "legacy"
+
+
 def _extract_volatility_pct(entry_price: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None) -> float:
     if volatility_pct is not None:
         try:
@@ -117,20 +136,14 @@ def compute_position_size(
         return 0.0
 
     base_position_size = (equity_value * risk_pct_value) / stop_value
+    vol_multiplier, volatility_path = _resolve_volatility_multiplier(
+        entry_value,
+        volatility_pct=volatility_pct,
+        signal=signal,
+        reasoning=reasoning,
+        asset=asset,
+    )
     volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
-    reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
-    atr_value = reasoning_map.get("atr") or reasoning_map.get("atr_14") or reasoning_map.get("atr_recent")
-    if atr_value is not None:
-        try:
-            vol_multiplier = compute_volatility_multiplier(
-                atr=float(atr_value),
-                price=entry_value,
-                baseline_atr_percent=resolve_baseline_atr_percent(),
-            )
-        except (TypeError, ValueError):
-            vol_multiplier = _volatility_multiplier(volatility_value)
-    else:
-        vol_multiplier = _volatility_multiplier(volatility_value)
     peak_value = float(peak_equity if peak_equity is not None else current_equity if current_equity is not None else equity_value)
     current_value = float(current_equity if current_equity is not None else equity_value)
     drawdown_pct = compute_drawdown_pct(current_value, peak_value)
@@ -140,6 +153,7 @@ def compute_position_size(
             "risk_pct": risk_pct_value,
             "stop_distance": stop_value,
             "volatility_pct": volatility_value,
+            "volatility_path": volatility_path,
             "vol_multiplier": vol_multiplier,
             "drawdown_pct": drawdown_pct,
             "dd_multiplier": 0.0,
@@ -170,6 +184,7 @@ def compute_position_size(
         "risk_pct": risk_pct_value,
         "stop_distance": stop_value,
         "volatility_pct": volatility_value,
+        "volatility_path": volatility_path,
         "vol_multiplier": vol_multiplier,
         "drawdown_pct": drawdown_pct,
         "dd_multiplier": dd_multiplier,

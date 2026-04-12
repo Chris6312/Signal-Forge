@@ -1,6 +1,7 @@
 import pytest
 
 from app.common.position_sizer import compute_position_size, compute_volatility_multiplier
+from app.common.risk_config import resolve_baseline_atr_percent
 
 
 def test_normal_volatility_returns_baseline_sizing():
@@ -143,6 +144,65 @@ def test_volatility_multiplier_reduces_size_when_atr_is_higher(monkeypatch):
 
     assert higher_vol < base
     assert compute_volatility_multiplier(atr=4.0, price=100.0, baseline_atr_percent=0.02) < 1.0
+
+
+def test_atr_present_prefers_atr_based_path(monkeypatch):
+    monkeypatch.delenv("BASELINE_ATR_PERCENT", raising=False)
+
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.03,
+        reasoning={"atr": 2.0},
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+
+    assert size == pytest.approx(15.0)
+
+
+def test_atr_absent_uses_legacy_volatility_pct_fallback():
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.03,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+
+    assert size == pytest.approx(6.0)
+
+
+def test_invalid_atr_falls_back_like_legacy_volatility_pct():
+    invalid_atr_size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.03,
+        reasoning={"atr": "bad"},
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+    fallback_size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.03,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+
+    assert invalid_atr_size == pytest.approx(fallback_size)
 
 
 def test_volatility_multiplier_increases_size_when_atr_is_lower(monkeypatch):
