@@ -19,7 +19,7 @@ from app.crypto.ledger import crypto_ledger
 from app.common.paper_ledger import KRAKEN_TAKER_FEE_RATE
 from app.common.models.ledger import LedgerEntry
 from app.common.symbols import canonical_symbol
-from app.services.runner_protection import get_effective_floor, promote_floor, promote_tp1
+from app.services.runner_protection import get_effective_floor, promote_floor, promote_follow_through, promote_tp1
 from app.common.position_time import compute_position_hold_metrics
 
 logger = logging.getLogger(__name__)
@@ -238,6 +238,22 @@ class CryptoExitWorker:
                     "protection_mode": "break_even",
                 },
             )
+
+        if bool(getattr(position, "tp1_hit", False) or (position.milestone_state or {}).get("tp1_hit")):
+            if promote_follow_through(position, current_price=current_price, ohlcv=ohlcv, now=now):
+                await log_event(
+                    db,
+                    "STOP_UPDATED",
+                    f"Follow-through stop promoted for {position.symbol}",
+                    asset_class=ASSET_CLASS,
+                    symbol=position.symbol,
+                    position_id=str(position.id),
+                    source=AuditSource.WORKER,
+                    event_data={
+                        "new_stop": position.current_stop,
+                        "reason": "follow_through",
+                    },
+                )
 
         if decision.should_exit:
             redis = None

@@ -104,19 +104,25 @@ def get_protection_snapshot(position: Any, ohlcv: Any | None = None) -> Position
     initial_stop = _float(_getattr(position, "initial_stop", None))
     entry_price = _float(_getattr(position, "entry_price", None))
 
-    final_floor_candidates = [
+    persisted_floor_candidates = [
         value for value in (
             initial_risk_price,
-            initial_stop,
-            current_stop,
             break_even_floor,
             promoted_floor,
             highest_promoted_floor,
-            _float(state.get("protected_floor")),
-            _float(state.get("trailing_stop")),
         ) if value is not None
     ]
-    final_floor = max(final_floor_candidates) if final_floor_candidates else None
+    final_floor = max(persisted_floor_candidates) if persisted_floor_candidates else None
+    if final_floor is None:
+        legacy_floor_candidates = [
+            value for value in (
+                current_stop,
+                initial_stop,
+                _float(state.get("protected_floor")),
+                _float(state.get("trailing_stop")),
+            ) if value is not None
+        ]
+        final_floor = max(legacy_floor_candidates) if legacy_floor_candidates else None
 
     runner_phase = _getattr(position, "runner_phase", None) or state.get("runner_phase")
     if runner_phase is None:
@@ -151,7 +157,7 @@ def get_protection_snapshot(position: Any, ohlcv: Any | None = None) -> Position
         milestone_version=milestone_version,
         last_protection_update_at=last_protection_update_at,
         fee_adjusted_break_even=break_even_floor,
-        promoted_protective_floor=promoted_floor,
+        promoted_protective_floor=final_floor,
         final_floor=final_floor,
     )
 
@@ -174,11 +180,12 @@ def _sync_milestone_state(position: Any, snapshot: PositionManagementState) -> N
     setattr(position, "milestone_state", state)
 
 
-def _log_protection_event(symbol: str, old_floor: float | None, new_floor: float | None, runner_phase: str | None, reason: str) -> None:
+def _log_protection_event(symbol: str, asset_class: str | None, old_floor: float | None, new_floor: float | None, runner_phase: str | None, reason: str) -> None:
     logger.debug(
         "runner_protection_event",
         extra={
             "symbol": symbol,
+            "asset_class": asset_class,
             "old_floor": old_floor,
             "new_floor": new_floor,
             "runner_phase": runner_phase,
@@ -203,22 +210,22 @@ def promote_tp1(position: Any, current_price: float | None = None, now: datetime
         return False
 
     old_floor = snapshot.final_floor
-    new_floor = max([value for value in (snapshot.final_floor, be_floor) if value is not None])
     current_stop = _float(_getattr(position, "current_stop", None))
+    new_floor = max([value for value in (snapshot.final_floor, be_floor, current_stop) if value is not None])
     if current_stop is None or new_floor > current_stop:
         setattr(position, "current_stop", new_floor)
 
     setattr(position, "tp1_hit", True)
     setattr(position, "tp1_price", tp1_price)
     setattr(position, "break_even_floor", max(snapshot.break_even_floor or be_floor, be_floor))
-    setattr(position, "promoted_floor", max(snapshot.promoted_floor or be_floor, be_floor))
+    setattr(position, "promoted_floor", max(snapshot.promoted_floor or be_floor, be_floor, new_floor))
     setattr(position, "highest_promoted_floor", max(snapshot.highest_promoted_floor or be_floor, be_floor, new_floor))
     setattr(position, "protection_mode", "break_even")
     setattr(position, "runner_phase", "breakeven")
     setattr(position, "milestone_version", MILESTONE_VERSION)
     setattr(position, "last_protection_update_at", now or _now())
     _sync_milestone_state(position, get_protection_snapshot(position))
-    _log_protection_event(_getattr(position, "symbol", ""), old_floor, get_effective_floor(position), "breakeven", "tp1_reached")
+    _log_protection_event(_getattr(position, "symbol", ""), _getattr(position, "asset_class", None), old_floor, get_effective_floor(position), "breakeven", "tp1_reached")
     return True
 
 
@@ -241,7 +248,7 @@ def promote_floor(position: Any, new_floor: float | None, runner_phase: str, rea
     setattr(position, "protection_mode", protection_mode or runner_phase)
     setattr(position, "last_protection_update_at", now or _now())
     _sync_milestone_state(position, get_protection_snapshot(position))
-    _log_protection_event(_getattr(position, "symbol", ""), old_floor, get_effective_floor(position), runner_phase, reason)
+    _log_protection_event(_getattr(position, "symbol", ""), _getattr(position, "asset_class", None), old_floor, get_effective_floor(position), runner_phase, reason)
     return True
 
 

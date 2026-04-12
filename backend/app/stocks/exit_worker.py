@@ -19,6 +19,7 @@ from app.stocks.strategies.exit_strategies import evaluate_exit
 from app.stocks.ledger import stock_ledger
 from app.common.models.ledger import LedgerEntry
 from app.common.position_time import compute_position_hold_metrics
+from app.services.runner_protection import get_effective_floor, promote_follow_through, promote_floor, promote_tp1
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,21 @@ class StockExitWorker:
                 (current_price - position.entry_price) * position.quantity
             )
 
+        active_floor = get_effective_floor(position)
+        if active_floor is not None:
+            if position.current_stop is None or active_floor > float(position.current_stop):
+                position.current_stop = active_floor
+            if current_price <= float(active_floor):
+                await self._close_position(
+                    db,
+                    position,
+                    current_price,
+                    f"Stop hit at {float(active_floor):.4f}",
+                    now,
+                )
+                position.updated_at = now
+                return
+
         # Enforce hard max-hold only when the strategy explicitly froze this policy
         try:
             hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
@@ -112,36 +128,49 @@ class StockExitWorker:
         decision = evaluate_exit(position, current_price, history)
 
         milestone = {**(position.milestone_state or {})}
-        milestone_changed = False
+        tp1_already_hit = bool(getattr(position, "tp1_hit", False) or milestone.get("tp1_hit"))
+        tp1_promoted = False
 
-        if decision.tp1_hit and not milestone.get("tp1_hit"):
-            milestone["tp1_hit"] = True
-            milestone["tp1_price"] = current_price
-            milestone_changed = True
+        if (decision.tp1_hit or decision.partial) and not tp1_already_hit:
+            tp1_promoted = promote_tp1(position, current_price=current_price, now=now)
+            tp1_already_hit = bool(getattr(position, "tp1_hit", False) or (position.milestone_state or {}).get("tp1_hit"))
 
         if decision.trailing_active and decision.new_stop is not None:
             milestone["trailing_stop"] = decision.new_stop
             milestone["trail_active"] = True
-            milestone_changed = True
-
-        if decision.new_stop and decision.new_stop != position.current_stop:
-            position.current_stop = decision.new_stop
-            if decision.reason and "break-even" in decision.reason.lower():
-                milestone["be_promoted"] = True
-                milestone_changed = True
-            await log_event(
-                db,
-                "STOP_UPDATED",
-                f"Stop updated to {decision.new_stop:.2f}",
-                asset_class=ASSET_CLASS,
-                symbol=position.symbol,
-                position_id=str(position.id),
-                source=AuditSource.WORKER,
-                event_data={"new_stop": decision.new_stop, "reason": decision.reason},
-            )
-
-        if milestone_changed:
             position.milestone_state = milestone
+
+        if decision.new_stop is not None:
+            if tp1_already_hit or tp1_promoted:
+                runner_phase = "trail_active" if decision.trailing_active else "breakeven"
+                if promote_floor(position, decision.new_stop, runner_phase, decision.reason, now=now):
+                    await log_event(
+                        db,
+                        "STOP_UPDATED",
+                        f"Stop updated to {decision.new_stop:.2f}",
+                        asset_class=ASSET_CLASS,
+                        symbol=position.symbol,
+                        position_id=str(position.id),
+                        source=AuditSource.WORKER,
+                        event_data={"new_stop": decision.new_stop, "reason": decision.reason},
+                    )
+            elif decision.new_stop != position.current_stop:
+                position.current_stop = decision.new_stop
+                if decision.reason and "break-even" in decision.reason.lower():
+                    milestone["be_promoted"] = True
+                milestone["trailing_stop"] = decision.new_stop
+                milestone["trail_active"] = bool(decision.trailing_active)
+                position.milestone_state = milestone
+                await log_event(
+                    db,
+                    "STOP_UPDATED",
+                    f"Stop updated to {decision.new_stop:.2f}",
+                    asset_class=ASSET_CLASS,
+                    symbol=position.symbol,
+                    position_id=str(position.id),
+                    source=AuditSource.WORKER,
+                    event_data={"new_stop": decision.new_stop, "reason": decision.reason},
+                )
 
         if decision.partial and not (position.milestone_state or {}).get("tp1_hit"):
             partial_qty = round((position.quantity or 0.0) * decision.partial_pct, 8)
@@ -231,6 +260,21 @@ class StockExitWorker:
                     "partial_qty": partial_qty,
                     "partial_pnl": partial_pnl,
                     "remaining_qty": position.quantity,
+                },
+            )
+
+        if tp1_already_hit and promote_follow_through(position, current_price=current_price, ohlcv=history, now=now):
+            await log_event(
+                db,
+                "STOP_UPDATED",
+                f"Follow-through stop promoted for {position.symbol}",
+                asset_class=ASSET_CLASS,
+                symbol=position.symbol,
+                position_id=str(position.id),
+                source=AuditSource.WORKER,
+                event_data={
+                    "new_stop": position.current_stop,
+                    "reason": "follow_through",
                 },
             )
 
