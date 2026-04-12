@@ -5,6 +5,8 @@ from __future__ import annotations
 This module intentionally keeps the logic small, pure, and side-effect free.
 """
 
+import math
+
 
 _CRYPTO_L1 = {"BTC/USD", "XBT/USD", "XXBTZUSD", "ETH/USD", "XETHZUSD", "SOL/USD", "ADA/USD", "AVAX/USD"}
 _CRYPTO_AI = {"TAO/USD", "FET/USD", "RNDR/USD"}
@@ -121,3 +123,73 @@ def compute_cluster_exposure_multiplier(
     if exposure_ratio < 0.40:
         return 0.6
     return 0.4
+
+
+def compute_symbol_concentration_ratio(
+    symbol: str,
+    proposed_trade_notional: float,
+    open_positions: list[dict],
+    account_equity: float,
+) -> float:
+    normalized_symbol = _normalize_symbol(symbol or "")
+    if not normalized_symbol:
+        return 0.0
+
+    try:
+        proposed_value = abs(float(proposed_trade_notional))
+        equity_value = float(account_equity)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if proposed_value <= 0 or equity_value <= 0:
+        return 0.0
+
+    total_notional = proposed_value
+
+    for position in open_positions or []:
+        if not isinstance(position, dict):
+            continue
+
+        position_symbol = position.get("symbol")
+        if not position_symbol:
+            continue
+
+        try:
+            normalized_position_symbol = _normalize_symbol(str(position_symbol))
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+        if normalized_position_symbol != normalized_symbol:
+            continue
+
+        market_value = position.get("market_value")
+        try:
+            position_notional = abs(float(market_value))
+        except (TypeError, ValueError):
+            continue
+
+        if position_notional <= 0:
+            continue
+
+        total_notional += position_notional
+
+    ratio = total_notional / equity_value
+    return ratio if ratio >= 0 else 0.0
+
+
+def compute_symbol_concentration_multiplier(concentration_ratio: float) -> float:
+    try:
+        ratio = float(concentration_ratio)
+    except (TypeError, ValueError):
+        return 1.0
+
+    if not math.isfinite(ratio) or ratio < 0:
+        return 1.0
+
+    if ratio < 0.20:
+        return 1.0
+    if ratio < 0.25:
+        return 0.75
+    if ratio < 0.30:
+        return 0.5
+    return 0.0

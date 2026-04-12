@@ -1,7 +1,11 @@
 import pytest
 
 from app.common.position_sizer import compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
-from app.common.portfolio_exposure import compute_cluster_exposure_multiplier
+from app.common.portfolio_exposure import (
+    compute_cluster_exposure_multiplier,
+    compute_symbol_concentration_multiplier,
+    compute_symbol_concentration_ratio,
+)
 from app.common.risk_config import resolve_baseline_atr_percent
 
 
@@ -413,7 +417,7 @@ def test_integrated_cluster_concentration_reduces_position_size():
     )
 
     assert no_concentration == pytest.approx(10.0)
-    assert concentrated == pytest.approx(4.0)
+    assert concentrated == 0.0
     assert concentrated < no_concentration
 
 
@@ -474,3 +478,172 @@ def test_unknown_symbol_uses_fallback_cluster_deterministically():
 
     assert with_open_positions == pytest.approx(0.8)
     assert repeated_call == pytest.approx(with_open_positions)
+
+
+@pytest.mark.parametrize(
+    ("concentration_ratio", "expected_multiplier"),
+    [
+        (0.0, 1.0),
+        (0.1999, 1.0),
+        (0.20, 0.75),
+        (0.2499, 0.75),
+        (0.25, 0.5),
+        (0.2999, 0.5),
+        (0.30, 0.0),
+        (0.75, 0.0),
+    ],
+)
+def test_compute_symbol_concentration_multiplier_threshold_boundaries(concentration_ratio, expected_multiplier):
+    assert compute_symbol_concentration_multiplier(concentration_ratio) == pytest.approx(expected_multiplier)
+
+
+@pytest.mark.parametrize("invalid_ratio", [None, -0.01, float("nan"), "bad"])
+def test_compute_symbol_concentration_multiplier_invalid_inputs_are_neutral(invalid_ratio):
+    assert compute_symbol_concentration_multiplier(invalid_ratio) == pytest.approx(1.0)
+
+
+def test_compute_symbol_concentration_ratio_aggregates_same_symbol_notional():
+    ratio = compute_symbol_concentration_ratio(
+        symbol=" btc/usd ",
+        proposed_trade_notional=1000.0,
+        open_positions=[
+            {"symbol": "BTC/USD", "market_value": 500.0},
+            {"symbol": "btc/usd", "market_value": -250.0},
+            {"symbol": "ETH/USD", "market_value": 9999.0},
+            {"symbol": None, "market_value": 100.0},
+            {"market_value": 100.0},
+            "bad",
+        ],
+        account_equity=10000.0,
+    )
+
+    assert ratio == pytest.approx(0.175)
+
+
+@pytest.mark.parametrize(
+    ("same_symbol_notional", "expected_size"),
+    [
+        (500.0, 10.0),
+        (1500.0, 6.0),
+        (2500.0, 0.0),
+    ],
+)
+def test_integrated_symbol_concentration_throttles_size_by_threshold(same_symbol_notional, expected_size):
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[{"symbol": "BTC/USD", "asset_class": "crypto", "market_value": same_symbol_notional}],
+    )
+
+    assert size == pytest.approx(expected_size)
+
+
+def test_integrated_symbol_concentration_deepens_to_zero_size():
+    neutral = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[],
+    )
+    blocked = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[{"symbol": "BTC/USD", "asset_class": "crypto", "market_value": 2500.0}],
+    )
+
+    assert neutral == pytest.approx(10.0)
+    assert blocked == 0.0
+    assert blocked < neutral
+
+
+def test_missing_symbol_or_open_positions_keeps_concentration_neutral():
+    baseline = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+
+    missing_symbol = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        open_positions=[{"symbol": "BTC/USD", "asset_class": "crypto", "market_value": 1500.0}],
+    )
+    missing_open_positions = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+    )
+
+    assert missing_symbol == pytest.approx(baseline)
+    assert missing_open_positions == pytest.approx(baseline)
+
+
+def test_invalid_symbol_concentration_inputs_fall_back_safely():
+    baseline = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[],
+    )
+    malformed = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[
+            None,
+            "bad",
+            {"symbol": "BTC/USD", "market_value": "bad"},
+            {"symbol": None, "market_value": 1000.0},
+        ],
+    )
+
+    assert malformed == pytest.approx(baseline)

@@ -4,7 +4,11 @@ import logging
 import statistics
 
 from app.common.account_state import compute_drawdown_pct, should_block_new_entries
-from app.common.portfolio_exposure import compute_cluster_exposure_multiplier
+from app.common.portfolio_exposure import (
+    compute_cluster_exposure_multiplier,
+    compute_symbol_concentration_multiplier,
+    compute_symbol_concentration_ratio,
+)
 from app.common.risk_config import normalize_asset_class, resolve_baseline_atr_percent, resolve_risk_per_trade_pct
 
 
@@ -184,16 +188,25 @@ def compute_position_size(
 
     dd_multiplier = compute_drawdown_risk_multiplier(drawdown_pct * 100.0)
     cluster_multiplier = 1.0
+    symbol_concentration_multiplier = 1.0
     if symbol and open_positions is not None:
+        proposed_notional = base_position_size * vol_multiplier * dd_multiplier * entry_value
         cluster_multiplier = compute_cluster_exposure_multiplier(
             symbol=symbol,
             asset_class=asset,
-            proposed_trade_notional=base_position_size * vol_multiplier * dd_multiplier * entry_value,
+            proposed_trade_notional=proposed_notional,
             open_positions=open_positions,
             account_equity=equity_value,
         )
+        concentration_ratio = compute_symbol_concentration_ratio(
+            symbol=symbol,
+            proposed_trade_notional=proposed_notional * cluster_multiplier,
+            open_positions=open_positions,
+            account_equity=equity_value,
+        )
+        symbol_concentration_multiplier = compute_symbol_concentration_multiplier(concentration_ratio)
 
-    final_size = max(0.0, base_position_size * vol_multiplier * dd_multiplier * cluster_multiplier)
+    final_size = max(0.0, base_position_size * vol_multiplier * dd_multiplier * cluster_multiplier * symbol_concentration_multiplier)
 
     if max_notional_pct is not None:
         try:
@@ -219,6 +232,7 @@ def compute_position_size(
         "drawdown_pct": drawdown_pct,
         "dd_multiplier": dd_multiplier,
         "cluster_multiplier": cluster_multiplier,
+        "symbol_concentration_multiplier": symbol_concentration_multiplier,
         "final_size": final_size,
     }
     logger.debug("position_sizer=%s", debug_payload)
