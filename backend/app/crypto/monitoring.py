@@ -16,7 +16,7 @@ from app.common.runtime_state import runtime_state
 from app.common.redis_client import get_redis
 from app.common.ws_manager import ws_manager
 from app.crypto.kraken_client import kraken_client
-from app.crypto.strategies.entry_strategies import evaluate_all
+from app.crypto.strategies.entry_strategies import evaluate_all, _closed_ohlcv, _ema
 from app.regime import regime_engine
 from app.regime.indicators import build_asset_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
@@ -46,6 +46,114 @@ def _strategy_key(value: str | None) -> str | None:
 
 def _signal_key(signal) -> str | None:
     return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _execution_readiness_adjustment(signal, candles_by_tf):
+    reasoning = dict(getattr(signal, "reasoning", {}) or {})
+    strategy_key = _signal_key(signal)
+    confidence_cap = float(reasoning.get("execution_confidence_cap") or getattr(signal, "confidence", 1.0) or 1.0)
+    ready = bool(reasoning.get("execution_ready", True))
+    block_reason = reasoning.get("execution_block_reason")
+
+    local_tf = "15m" if candles_by_tf.get("15m") else ("1H" if candles_by_tf.get("1H") else None)
+    local_ohlcv = _closed_ohlcv(candles_by_tf.get(local_tf, []), TF_MINUTES[local_tf]) if local_tf else []
+    if len(local_ohlcv) < 20:
+        return {
+            "execution_ready": ready,
+            "confidence_cap": confidence_cap,
+            "block_reason": block_reason,
+        }
+
+    closes = [float(c[4]) for c in local_ohlcv]
+    ema9 = _ema(closes, 9)
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    if not ema20:
+        return {
+            "execution_ready": ready,
+            "confidence_cap": confidence_cap,
+            "block_reason": block_reason,
+        }
+
+    current = closes[-1]
+    previous = closes[-2] if len(closes) >= 2 else current
+    ema9_now = ema9[-1] if ema9 else None
+    ema20_now = ema20[-1]
+    ema50_now = ema50[-1] if ema50 else None
+    weak_closes = sum(1 for close in closes[-4:-1] if close <= ema20_now)
+
+    if strategy_key == "breakout_retest":
+        if (ema9_now is not None and current <= ema9_now) or current <= ema20_now:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.40),
+                "block_reason": "lower_timeframe_reclaim_unresolved",
+            }
+        if weak_closes >= 2:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.45),
+                "block_reason": "repeated_weak_closes_below_fast_support",
+            }
+        if current <= previous:
+            confidence_cap = min(confidence_cap, 0.60)
+        elif ema50_now is not None and current <= ema50_now:
+            confidence_cap = min(confidence_cap, 0.65)
+        else:
+            confidence_cap = min(confidence_cap, 0.72)
+        return {
+            "execution_ready": True,
+            "confidence_cap": confidence_cap,
+            "block_reason": None,
+        }
+
+    if strategy_key == "pullback_reclaim":
+        true_reclaim = current > ema20_now and (ema9_now is None or current > ema9_now) and previous <= ema20_now
+        if not true_reclaim:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.50),
+                "block_reason": "true_reclaim_not_confirmed",
+            }
+        confidence_cap = min(confidence_cap, 0.72)
+        return {
+            "execution_ready": True,
+            "confidence_cap": confidence_cap,
+            "block_reason": None,
+        }
+
+    if strategy_key == "trend_continuation":
+        support_lost = (ema9_now is not None and current < ema9_now) or current < ema20_now
+        recent_peak = max(closes[-5:]) if len(closes) >= 5 else max(closes)
+        extension_loss = current <= previous and (recent_peak - current) / max(recent_peak, 1.0) >= 0.015
+        failed_follow_through = support_lost and current <= previous
+        if failed_follow_through or extension_loss:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.50),
+                "block_reason": "failed_follow_through",
+            }
+        if support_lost:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.55),
+                "block_reason": "fast_support_lost_after_breakout",
+            }
+        if current <= previous:
+            confidence_cap = min(confidence_cap, 0.80)
+        else:
+            confidence_cap = min(confidence_cap, 0.90)
+        return {
+            "execution_ready": True,
+            "confidence_cap": confidence_cap,
+            "block_reason": None,
+        }
+
+    return {
+        "execution_ready": ready,
+        "confidence_cap": confidence_cap,
+        "block_reason": block_reason,
+    }
 
 
 def _select_top_signal(result):
@@ -186,6 +294,25 @@ class CryptoMonitor:
         best = _select_top_signal(eval_result)
         if not best:
             return
+
+        readiness = _execution_readiness_adjustment(best, candles_by_tf)
+        if hasattr(best, "reasoning"):
+            best.reasoning = dict(getattr(best, "reasoning", {}) or {})
+            best.reasoning["execution_ready"] = readiness["execution_ready"]
+            best.reasoning["execution_confidence_cap"] = readiness["confidence_cap"]
+            best.reasoning["execution_block_reason"] = readiness["block_reason"]
+
+        if not readiness["execution_ready"]:
+            logger.info(
+                "Entry blocked by execution readiness for %s: %s",
+                can,
+                readiness["block_reason"],
+            )
+            return
+
+        if readiness["confidence_cap"] < best.confidence:
+            best.confidence = readiness["confidence_cap"]
+
         logger.info(
             "Entry signal for %s: %s (confidence=%.2f)",
             can, best.strategy, best.confidence

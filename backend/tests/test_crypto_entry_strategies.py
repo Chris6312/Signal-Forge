@@ -272,3 +272,14 @@ def test_include_diagnostics_top_strategy_matches_top_signal():
         top_signal = result["signals"][0]
         assert top_signal.confidence == pytest.approx(result["top_confidence"])
 
+
+def test_include_diagnostics_adds_crypto_execution_readiness_metadata():
+    base = trending_up_ohlcv(64, start=100.0, end=199.0)
+    base.append(make_candle(64, 215.0, spread=0.002))
+    result = evaluate_all("BTC/USD", base, include_diagnostics=True)
+    breakout = next(sig for sig in result["signals"] if sig.strategy == "Breakout Retest Hold")
+
+    assert "execution_ready" in breakout.reasoning
+    assert "execution_confidence_cap" in breakout.reasoning
+    assert "execution_block_reason" in breakout.reasoning
+

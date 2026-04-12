@@ -157,6 +157,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         "fallback_stop": fallback_stop,
         "fallback_tp1": fallback_tp1,
     }
+    reasoning.update(_execution_readiness_metadata(strategy_key, reasoning))
 
     if strategy_key == "range_rotation":
         range_lookback = 30 if len(highs) >= 31 else max(5, len(highs) - 1)
@@ -234,6 +235,51 @@ class EntrySignal:
     max_hold_hours: int = 48
     notes: str = ""
     reasoning: dict = field(default_factory=dict)
+
+
+def _execution_readiness_metadata(strategy_key: str, reasoning: dict) -> dict:
+    reasoning = reasoning or {}
+    current_vs_ema20 = reasoning.get("current_vs_ema20")
+    ready = True
+    confidence_cap = 1.0
+    block_reason = None
+
+    def _apply(cap: float, reason: str | None = None, block: bool = False):
+        nonlocal confidence_cap, ready, block_reason
+        confidence_cap = min(confidence_cap, cap)
+        if reason:
+            block_reason = reason
+        if block:
+            ready = False
+
+    if strategy_key == "breakout_retest":
+        if reasoning.get("reclaim_confirmed") is False:
+            _apply(0.55, "retest_reclaim_unresolved")
+        if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
+            _apply(0.35, "below_fast_ema_support", block=True)
+        if not reasoning.get("higher_closes_confirmed") and not reasoning.get("three_ascending_closes"):
+            _apply(0.45, "weak_follow_through")
+
+    elif strategy_key == "pullback_reclaim":
+        if not reasoning.get("reclaim_confirmed"):
+            _apply(0.50, "reclaim_not_confirmed")
+        if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
+            _apply(0.40, "below_reclaim_cluster", block=True)
+
+    elif strategy_key == "trend_continuation":
+        if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
+            _apply(0.55, "fast_support_lost", block=True)
+        if not reasoning.get("higher_highs_confirmed") or not reasoning.get("higher_lows_confirmed"):
+            _apply(0.80, "follow_through_not_fully_confirmed")
+        breakout_pct = reasoning.get("breakout_pct")
+        if breakout_pct is not None and float(breakout_pct) < 0.5:
+            _apply(0.70, "breakout_extension_unproven")
+
+    return {
+        "execution_ready": ready,
+        "execution_confidence_cap": round(confidence_cap, 6),
+        "execution_block_reason": block_reason,
+    }
 
 
 def _ema(prices, period):
