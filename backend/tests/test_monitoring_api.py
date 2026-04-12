@@ -8,7 +8,7 @@ from app.api.routes import monitoring as monitoring_route
 from app.api.routes.monitoring import _select_top_signal, _strategy_key, get_monitoring_candidates
 from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal
 from app.stocks.monitoring import StockMonitor, _select_top_signal as stock_select_top_signal
-from tests.conftest import make_candle, trending_down_ohlcv, trending_up_ohlcv
+from tests.conftest import make_bar, make_candle, trending_down_ohlcv, trending_up_history, trending_up_ohlcv
 
 
 def test_strategy_key_normalizes_labels_and_keys():
@@ -188,6 +188,113 @@ async def test_stock_monitor_evaluates_once_per_new_5m_trigger_candle(monkeypatc
 
     assert evaluate_all.call_count == 2
     assert monitor._create_position.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stock_monitor_blocks_overextended_opening_range_breakout(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="AAPL", added_at=None)
+    signal = SimpleNamespace(
+        strategy="Opening Range Breakout",
+        strategy_key="opening_range_breakout",
+        confidence=0.92,
+        reasoning={"opening_range_high": 110.0, "recent_high_20": 110.0},
+    )
+
+    monkeypatch.setattr(
+        "app.stocks.monitoring.evaluate_all",
+        lambda *args, **kwargs: {"signals": [signal], "top_strategy": "opening_range_breakout", "top_confidence": 0.92},
+    )
+    monkeypatch.setattr("app.stocks.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.stocks.monitoring.can_enter_trade", lambda: True)
+    monkeypatch.setattr("app.stocks.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    create_position = AsyncMock()
+    monkeypatch.setattr(monitor, "_create_position", create_position)
+    monkeypatch.setattr("app.stocks.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_history(20, start=100.0, end=140.0))
+
+    await monitor._evaluate_symbol(db, ws)
+
+    assert create_position.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stock_monitor_caps_volatility_compression_breakout_before_execution(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="AAPL", added_at=None)
+    signal = SimpleNamespace(
+        strategy="Volatility Compression Breakout",
+        strategy_key="volatility_compression_breakout",
+        confidence=0.92,
+        reasoning={"compression_high_10": 105.0, "compression_low_10": 98.0},
+    )
+
+    captured = {}
+
+    monkeypatch.setattr(
+        "app.stocks.monitoring.evaluate_all",
+        lambda *args, **kwargs: {"signals": [signal], "top_strategy": "volatility_compression_breakout", "top_confidence": 0.92},
+    )
+    monkeypatch.setattr("app.stocks.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.stocks.monitoring.can_enter_trade", lambda: True)
+    monkeypatch.setattr("app.stocks.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    create_position = AsyncMock()
+    monkeypatch.setattr(monitor, "_create_position", create_position)
+    monkeypatch.setattr(
+        "app.stocks.monitoring.regime_engine.can_open",
+        lambda *args, **kwargs: (captured.setdefault("confidence", args[2]), (True, None))[1],
+    )
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_history(20, start=100.0, end=107.0))
+
+    await monitor._evaluate_symbol(db, ws)
+
+    assert create_position.await_count == 1
+    assert captured["confidence"] == pytest.approx(0.64)
+
+
+@pytest.mark.asyncio
+async def test_stock_monitor_blocks_trend_continuation_when_fast_support_fails(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="AAPL", added_at=None)
+    signal = SimpleNamespace(
+        strategy="Trend Continuation Ladder",
+        strategy_key="trend_continuation",
+        confidence=0.92,
+        reasoning={},
+    )
+
+    evaluate_all = MagicMock(return_value={"signals": [signal], "top_strategy": "trend_continuation", "top_confidence": 0.92})
+    monkeypatch.setattr("app.stocks.monitoring.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.stocks.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.stocks.monitoring.can_enter_trade", lambda: True)
+    monkeypatch.setattr("app.stocks.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    create_position = AsyncMock()
+    monkeypatch.setattr(monitor, "_create_position", create_position)
+    can_open = MagicMock(return_value=(True, None))
+    monkeypatch.setattr("app.stocks.monitoring.regime_engine.can_open", can_open)
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
+    candles = trending_up_history(20, start=100.0, end=110.0)
+    candles[-1] = make_bar(100.0)
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: candles)
+
+    await monitor._evaluate_symbol(db, ws)
+
+    assert create_position.await_count == 0
+    assert can_open.call_count == 0
 
 
 @pytest.mark.asyncio

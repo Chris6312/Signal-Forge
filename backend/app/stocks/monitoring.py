@@ -23,6 +23,7 @@ from app.regime.indicators import build_asset_indicators, build_vix_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
 from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
 from app.stocks.candle_fetcher import StockCandleFetcher
+from app.stocks.strategies.entry_strategies import _execution_readiness_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,21 @@ class StockMonitor:
         best = _select_top_signal(eval_result)
         if not best:
             return
+
+        readiness = _execution_readiness_adjustment(best, candles_by_tf)
+        if hasattr(best, "reasoning"):
+            best.reasoning = dict(getattr(best, "reasoning", {}) or {})
+            best.reasoning["execution_ready"] = readiness["execution_ready"]
+            best.reasoning["execution_confidence_cap"] = readiness["confidence_cap"]
+            best.reasoning["execution_block_reason"] = readiness["block_reason"]
+
+        if not readiness["execution_ready"]:
+            logger.info("Entry blocked by execution readiness for %s: %s", ws.symbol, readiness["block_reason"])
+            return
+
+        if readiness["confidence_cap"] < best.confidence:
+            best.confidence = readiness["confidence_cap"]
+
         logger.info("Stock entry signal: %s via %s (confidence=%.2f)", ws.symbol, best.strategy, best.confidence)
 
         current_count = await self._count_open_positions(db)

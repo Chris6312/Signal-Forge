@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Union
 from typing import Optional
 from app.common.watchlist_schema_v4 import (
     score_strategy_from_candles,
@@ -678,6 +679,104 @@ STOCK_ENTRY_STRATEGIES = [
     FailedBreakdownReclaim(),
     VolatilityCompressionBreakout(),
 ]
+
+
+def _execution_readiness_adjustment(signal, candles_by_tf):
+    reasoning = dict(getattr(signal, "reasoning", {}) or {})
+    strategy_key = (
+        _strategy_name_to_key(getattr(signal, "strategy", "") or "")
+        or _strategy_name_to_key(str(reasoning.get("strategy_key") or ""))
+        or _strategy_name_to_key(str(getattr(signal, "strategy_key", "") or ""))
+    )
+
+    cap_value = reasoning.get("execution_confidence_cap")
+    confidence_cap = float(cap_value if cap_value is not None else getattr(signal, "confidence", 1.0) or 1.0)
+    execution_ready = bool(reasoning.get("execution_ready", True))
+    block_reason = reasoning.get("execution_block_reason")
+
+    trigger_history = _closed_history(candles_by_tf.get("5m", []), 5)
+    if len(trigger_history) < 20:
+        return {
+            "execution_ready": execution_ready,
+            "confidence_cap": confidence_cap,
+            "block_reason": block_reason,
+        }
+
+    closes = _closes(trigger_history)
+    ema9 = _ema(closes, 9)
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+
+    if not ema20:
+        return {
+            "execution_ready": execution_ready,
+            "confidence_cap": confidence_cap,
+            "block_reason": block_reason,
+        }
+
+    current = closes[-1]
+    previous = closes[-2] if len(closes) >= 2 else current
+    ema9_now = ema9[-1] if ema9 else None
+    ema20_now = ema20[-1]
+    ema50_now = ema50[-1] if ema50 else None
+    current_vs_fast_support = (current - ema20_now) / max(ema20_now, 1e-6)
+    weak_closes = sum(1 for close in closes[-4:-1] if close <= ema20_now)
+
+    def _result(ready: bool, cap: float, reason: str | None):
+        return {
+            "execution_ready": ready,
+            "confidence_cap": min(confidence_cap, cap),
+            "block_reason": reason,
+        }
+
+    if strategy_key == "opening_range_breakout":
+        breakout_level = float(reasoning.get("opening_range_high") or reasoning.get("recent_high_20") or 0.0)
+        breakout_extension = (current - breakout_level) / max(breakout_level, 1e-6) if breakout_level else 0.0
+
+        if (ema9_now is not None and current <= ema9_now) or current <= ema20_now:
+            return _result(False, 0.45, "fast_support_lost_on_trigger_candle")
+        if breakout_level and current <= breakout_level:
+            return _result(False, 0.50, "breakout_acceptance_not_confirmed")
+        if current_vs_fast_support >= 0.045 or breakout_extension >= 0.03:
+            return _result(False, 0.58, "opening_range_breakout_too_extended")
+        if current_vs_fast_support >= 0.025:
+            return _result(True, 0.62, None)
+        if current <= previous or weak_closes >= 2:
+            return _result(True, 0.60, None)
+        return _result(True, 0.72, None)
+
+    if strategy_key == "volatility_compression_breakout":
+        breakout_level = float(reasoning.get("compression_high_10") or reasoning.get("compression_high") or 0.0)
+        breakout_extension = (current - breakout_level) / max(breakout_level, 1e-6) if breakout_level else 0.0
+
+        if (ema9_now is not None and current <= ema9_now) or current <= ema20_now:
+            return _result(False, 0.45, "fast_support_lost_on_trigger_candle")
+        if breakout_level and current <= breakout_level:
+            return _result(False, 0.50, "breakout_acceptance_not_confirmed")
+        if current_vs_fast_support >= 0.05 or breakout_extension >= 0.04:
+            return _result(False, 0.60, "compression_breakout_too_extended")
+        if current_vs_fast_support >= 0.03 or breakout_extension >= 0.025:
+            return _result(True, 0.64, None)
+        if current <= previous or weak_closes >= 2:
+            return _result(True, 0.60, None)
+        return _result(True, 0.73, None)
+
+    if strategy_key == "trend_continuation":
+        if (ema9_now is not None and current <= ema9_now) or current <= ema20_now:
+            return _result(False, 0.50, "fast_support_lost_after_continuation")
+        if current_vs_fast_support >= 0.06:
+            return _result(False, 0.60, "continuation_too_extended")
+        if current_vs_fast_support >= 0.03:
+            return _result(True, 0.78, None)
+        if current <= previous or weak_closes >= 2 or (ema50_now is not None and current <= ema50_now):
+            return _result(True, 0.74, None)
+        return _result(True, 0.88, None)
+
+    return {
+        "execution_ready": execution_ready,
+        "confidence_cap": confidence_cap,
+        "block_reason": block_reason,
+    }
 
 # Scoring thresholds
 MIN_SCORE_THRESHOLD = 0.35

@@ -5,6 +5,7 @@ from app.stocks.strategies.entry_strategies import (
     _ema,
     _atr_from_history,
     _detect_regime,
+    _execution_readiness_adjustment,
     OpeningRangeBreakout,
     PullbackReclaim,
     TrendContinuationLadder,
@@ -259,6 +260,69 @@ def test_ai_hint_bias_applied_and_capped(caplog):
             assert payload["ai_hint_bias_amount"] == pytest.approx(0.03)
             assert payload["ai_hint_agreement"] is True
     assert found
+
+
+# ---------------------------------------------------------------------------
+# execution readiness
+# ---------------------------------------------------------------------------
+
+class TestExecutionReadinessAdjustment:
+    def test_opening_range_breakout_is_blocked_when_too_extended(self):
+        signal = StockEntrySignal(
+            strategy="Opening Range Breakout",
+            symbol="AAPL",
+            entry_price=140.0,
+            initial_stop=130.0,
+            profit_target_1=150.0,
+            profit_target_2=160.0,
+            regime="trending_up",
+            confidence=0.92,
+            reasoning={"opening_range_high": 110.0, "recent_high_20": 110.0},
+        )
+        adjustment = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=140.0)})
+
+        assert adjustment["execution_ready"] is False
+        assert adjustment["block_reason"] == "opening_range_breakout_too_extended"
+
+    def test_volatility_compression_breakout_is_capped_until_clean_acceptance(self):
+        signal = StockEntrySignal(
+            strategy="Volatility Compression Breakout",
+            symbol="AAPL",
+            entry_price=107.0,
+            initial_stop=100.0,
+            profit_target_1=115.0,
+            profit_target_2=120.0,
+            regime="trending_up",
+            confidence=0.92,
+            reasoning={"compression_high_10": 105.0, "compression_low_10": 98.0},
+        )
+        adjustment = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=107.0)})
+
+        assert adjustment["execution_ready"] is True
+        assert adjustment["confidence_cap"] < signal.confidence
+        assert adjustment["confidence_cap"] == pytest.approx(0.64)
+
+    def test_trend_continuation_ladder_caps_or_blocks_on_extension_and_support_loss(self):
+        signal = StockEntrySignal(
+            strategy="Trend Continuation Ladder",
+            symbol="AAPL",
+            entry_price=110.0,
+            initial_stop=100.0,
+            profit_target_1=118.0,
+            profit_target_2=125.0,
+            regime="trending_up",
+            confidence=0.92,
+        )
+
+        capped = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=110.0)})
+        blocked_history = trending_up_history(20, start=100.0, end=110.0)
+        blocked_history[-1] = make_bar(100.0)
+        blocked = _execution_readiness_adjustment(signal, {"5m": blocked_history})
+
+        assert capped["execution_ready"] is True
+        assert capped["confidence_cap"] < signal.confidence
+        assert blocked["execution_ready"] is False
+        assert blocked["block_reason"] == "fast_support_lost_after_continuation"
 
 
 def test_ai_hint_does_not_make_invalid_strategy_valid(caplog):
