@@ -3,7 +3,15 @@ import pytest
 
 from app.stocks.strategies.entry_strategies import evaluate_all as evaluate_stocks
 from app.crypto.strategies.entry_strategies import evaluate_all as evaluate_crypto
-from app.common.watchlist_schema_v4 import compute_features_for_signal, compute_strategy_score
+from app.common.watchlist_schema_v4 import (
+    CRYPTO_STRATEGY_WEIGHTS,
+    STOCK_STRATEGY_WEIGHTS,
+    STRATEGY_WEIGHTS,
+    WEIGHTS,
+    WEIGHTS_BY_REGIME,
+    compute_features_for_signal,
+    compute_strategy_score,
+)
 from tests.conftest import (
     trending_up_history,
     ranging_history,
@@ -20,6 +28,46 @@ def _extract_audit_from_caplog(caplog):
             parts = rec.getMessage().split("|", 2)
             return json.loads(parts[2].strip())
     return None
+
+
+def _score_features(strategy_key, *, asset_class="stock", **components):
+    features = {
+        "structure": components.get("structure", 0.0),
+        "trend_alignment": components.get("trend_alignment", 0.0),
+        "momentum": components.get("momentum", 0.0),
+        "reclaim_or_breakout": components.get("reclaim_or_breakout", 0.0),
+        "volume": components.get("volume", 0.0),
+        "risk_reward": components.get("risk_reward", 0.0),
+        "trend_maturity_penalty": 1.0 - components.get("maturity", 1.0),
+        "regime_fit": components.get("regime_fit", 1.0),
+        "_diagnostics": {"raw_signal_present": True},
+    }
+    return compute_strategy_score(strategy_key, features, regime=None, asset_class=asset_class)
+
+
+def _all_weight_matrices():
+    return {
+        "WEIGHTS": WEIGHTS,
+        "WEIGHTS_BY_REGIME.RISK_ON": WEIGHTS_BY_REGIME["RISK_ON"],
+        "WEIGHTS_BY_REGIME.NEUTRAL": WEIGHTS_BY_REGIME["NEUTRAL"],
+        "WEIGHTS_BY_REGIME.RISK_OFF": WEIGHTS_BY_REGIME["RISK_OFF"],
+        "STRATEGY_WEIGHTS.trend_continuation": STRATEGY_WEIGHTS["trend_continuation"],
+        "STRATEGY_WEIGHTS.breakout_retest": STRATEGY_WEIGHTS["breakout_retest"],
+        "STRATEGY_WEIGHTS.range_rotation": STRATEGY_WEIGHTS["range_rotation"],
+        "STRATEGY_WEIGHTS.opening_range_breakout": STRATEGY_WEIGHTS["opening_range_breakout"],
+        "STRATEGY_WEIGHTS.volatility_compression_breakout": STRATEGY_WEIGHTS["volatility_compression_breakout"],
+        "STRATEGY_WEIGHTS.failed_breakdown_reclaim": STRATEGY_WEIGHTS["failed_breakdown_reclaim"],
+        "CRYPTO_STRATEGY_WEIGHTS.pullback_reclaim": CRYPTO_STRATEGY_WEIGHTS["pullback_reclaim"],
+        "CRYPTO_STRATEGY_WEIGHTS.trend_continuation": CRYPTO_STRATEGY_WEIGHTS["trend_continuation"],
+        "CRYPTO_STRATEGY_WEIGHTS.breakout_retest": CRYPTO_STRATEGY_WEIGHTS["breakout_retest"],
+        "CRYPTO_STRATEGY_WEIGHTS.mean_reversion_bounce": CRYPTO_STRATEGY_WEIGHTS["mean_reversion_bounce"],
+        "CRYPTO_STRATEGY_WEIGHTS.range_rotation": CRYPTO_STRATEGY_WEIGHTS["range_rotation"],
+    }
+
+
+def test_all_weight_matrices_sum_to_one():
+    for name, matrix in _all_weight_matrices().items():
+        assert abs(sum(matrix.values()) - 1.0) < 0.0001, name
 
 
 def test_non_zero_score_for_valid_trend_continuation(caplog):
@@ -194,6 +242,103 @@ def test_crypto_range_rotation_is_suppressed_in_strong_trend(caplog):
     assert scores.get("range_rotation", 0.0) < scores.get("trend_continuation", 0.0)
 
 
+def test_crypto_range_rotation_rewards_structure_trigger_and_rr_over_trend_or_volume():
+    strong_range = _score_features(
+        "range_rotation",
+        asset_class="crypto",
+        structure=0.95,
+        trend_alignment=0.05,
+        momentum=0.35,
+        reclaim_or_breakout=0.90,
+        volume=0.20,
+        risk_reward=0.95,
+        maturity=0.90,
+        regime_fit=1.0,
+    )
+    trend_heavy = _score_features(
+        "range_rotation",
+        asset_class="crypto",
+        structure=0.10,
+        trend_alignment=0.95,
+        momentum=0.35,
+        reclaim_or_breakout=0.90,
+        volume=0.20,
+        risk_reward=0.95,
+        maturity=0.90,
+        regime_fit=1.0,
+    )
+    volume_heavy = _score_features(
+        "range_rotation",
+        asset_class="crypto",
+        structure=0.10,
+        trend_alignment=0.05,
+        momentum=0.35,
+        reclaim_or_breakout=0.90,
+        volume=1.0,
+        risk_reward=0.95,
+        maturity=0.90,
+        regime_fit=1.0,
+    )
+    wrong_regime = _score_features(
+        "range_rotation",
+        asset_class="crypto",
+        structure=0.95,
+        trend_alignment=0.05,
+        momentum=0.35,
+        reclaim_or_breakout=0.90,
+        volume=0.20,
+        risk_reward=0.95,
+        maturity=0.90,
+        regime_fit=0.15,
+    )
+
+    assert strong_range > trend_heavy
+    assert strong_range > volume_heavy
+    assert strong_range > wrong_regime
+
+
+def test_crypto_trend_continuation_rewards_momentum_more_than_volume_and_wrong_regime_suppresses():
+    momentum_heavy = _score_features(
+        "trend_continuation",
+        asset_class="crypto",
+        structure=0.70,
+        trend_alignment=0.85,
+        momentum=0.95,
+        reclaim_or_breakout=0.80,
+        volume=0.15,
+        risk_reward=0.55,
+        maturity=0.85,
+        regime_fit=1.0,
+    )
+    volume_heavy = _score_features(
+        "trend_continuation",
+        asset_class="crypto",
+        structure=0.70,
+        trend_alignment=0.85,
+        momentum=0.15,
+        reclaim_or_breakout=0.80,
+        volume=1.0,
+        risk_reward=0.55,
+        maturity=0.85,
+        regime_fit=1.0,
+    )
+    suppressed = _score_features(
+        "trend_continuation",
+        asset_class="crypto",
+        structure=0.70,
+        trend_alignment=0.85,
+        momentum=0.95,
+        reclaim_or_breakout=0.80,
+        volume=0.15,
+        risk_reward=0.55,
+        maturity=0.85,
+        regime_fit=0.05,
+    )
+
+    assert momentum_heavy > volume_heavy
+    assert momentum_heavy > suppressed
+
+
 def test_crypto_breakout_retest_requires_real_retest_context():
     class S: pass
     s = S()
@@ -273,6 +418,90 @@ def test_crypto_breakout_retest_outscores_range_rotation_on_retest_setup():
     breakout_retest = compute_strategy_score("breakout_retest", features, regime="trending_up", asset_class="crypto")
     range_rotation = compute_strategy_score("range_rotation", features, regime="trending_up", asset_class="crypto")
     assert breakout_retest > range_rotation
+
+
+def test_failed_breakdown_reclaim_rewards_trigger_and_rr_more_than_volume_and_wrong_regime_suppresses():
+    trigger_heavy = _score_features(
+        "failed_breakdown_reclaim",
+        asset_class="stock",
+        structure=0.55,
+        trend_alignment=0.20,
+        momentum=0.30,
+        reclaim_or_breakout=0.95,
+        volume=0.15,
+        risk_reward=0.90,
+        maturity=0.85,
+        regime_fit=1.0,
+    )
+    volume_heavy = _score_features(
+        "failed_breakdown_reclaim",
+        asset_class="stock",
+        structure=0.55,
+        trend_alignment=0.20,
+        momentum=0.30,
+        reclaim_or_breakout=0.10,
+        volume=1.0,
+        risk_reward=0.90,
+        maturity=0.85,
+        regime_fit=1.0,
+    )
+    suppressed = _score_features(
+        "failed_breakdown_reclaim",
+        asset_class="stock",
+        structure=0.55,
+        trend_alignment=0.20,
+        momentum=0.30,
+        reclaim_or_breakout=0.95,
+        volume=0.15,
+        risk_reward=0.90,
+        maturity=0.85,
+        regime_fit=0.15,
+    )
+
+    assert trigger_heavy > volume_heavy
+    assert trigger_heavy > suppressed
+
+
+def test_volatility_compression_breakout_reacts_to_breakout_strength_and_wrong_regime_suppresses():
+    breakout_heavy = _score_features(
+        "volatility_compression_breakout",
+        asset_class="stock",
+        structure=0.65,
+        trend_alignment=0.70,
+        momentum=0.85,
+        reclaim_or_breakout=0.95,
+        volume=0.55,
+        risk_reward=0.55,
+        maturity=0.90,
+        regime_fit=1.0,
+    )
+    volume_heavy = _score_features(
+        "volatility_compression_breakout",
+        asset_class="stock",
+        structure=0.65,
+        trend_alignment=0.70,
+        momentum=0.20,
+        reclaim_or_breakout=0.20,
+        volume=1.0,
+        risk_reward=0.55,
+        maturity=0.90,
+        regime_fit=1.0,
+    )
+    suppressed = _score_features(
+        "volatility_compression_breakout",
+        asset_class="stock",
+        structure=0.65,
+        trend_alignment=0.70,
+        momentum=0.85,
+        reclaim_or_breakout=0.95,
+        volume=0.55,
+        risk_reward=0.55,
+        maturity=0.90,
+        regime_fit=0.10,
+    )
+
+    assert breakout_heavy > volume_heavy
+    assert breakout_heavy > suppressed
 
 
 def test_stock_opening_range_breakout_scores_above_pullback_on_orb_setup():

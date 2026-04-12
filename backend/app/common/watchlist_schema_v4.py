@@ -741,12 +741,12 @@ CRYPTO_STRATEGY_WEIGHTS = {
         "maturity": 0.10,
     },
     "range_rotation": {
-        "structure": 0.20,
+        "structure": 0.24,
         "trend": 0.02,
         "momentum": 0.08,
-        "trigger": 0.24,
+        "trigger": 0.27,
         "volume": 0.03,
-        "risk_reward": 0.28,
+        "risk_reward": 0.31,
         "maturity": 0.05,
     },
 }
