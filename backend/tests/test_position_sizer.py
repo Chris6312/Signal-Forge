@@ -907,3 +907,34 @@ def test_favorable_regime_does_not_resurrect_zero_size():
 
     assert neutral_zero == 0.0
     assert favorable_zero == 0.0
+
+
+def test_successful_sizing_populates_risk_multipliers_reasoning():
+    reasoning = {"atr": 2.0}
+
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+        symbol="BTC/USD",
+        open_positions=[],
+        reasoning=reasoning,
+        signal=SimpleNamespace(regime="neutral"),
+    )
+
+    assert size > 0
+    risk_multipliers = reasoning["risk_multipliers"]
+    assert set(risk_multipliers) == {
+        "volatility_multiplier",
+        "drawdown_multiplier",
+        "cluster_multiplier",
+        "concentration_multiplier",
+        "regime_multiplier",
+        "effective_risk_multiplier",
+    }
+    for key, value in risk_multipliers.items():
+        assert isinstance(value, (int, float)), key
