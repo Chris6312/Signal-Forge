@@ -19,6 +19,7 @@ from app.crypto.ledger import crypto_ledger
 from app.common.paper_ledger import KRAKEN_TAKER_FEE_RATE
 from app.common.models.ledger import LedgerEntry
 from app.common.symbols import canonical_symbol
+from app.services.runner_protection import get_effective_floor, promote_floor, promote_tp1
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,10 @@ class CryptoExitWorker:
                 (current_price - position.entry_price) * position.quantity
             )
 
-        active_floor = position.current_stop or position.initial_stop
+        active_floor = get_effective_floor(position)
+        if active_floor is not None:
+            if position.current_stop is None or active_floor > float(position.current_stop):
+                position.current_stop = active_floor
         milestone = {**(position.milestone_state or {})}
         if active_floor is not None and current_price <= float(active_floor):
             await self._close_position(
@@ -119,34 +123,21 @@ class CryptoExitWorker:
             ohlcv = []
 
         decision = evaluate_exit(position, current_price, ohlcv)
-        milestone_changed = False
-        tp1_already_hit = bool((position.milestone_state or {}).get("tp1_hit"))
+        tp1_already_hit = bool(getattr(position, "tp1_hit", False) or milestone.get("tp1_hit"))
 
-        if decision.tp1_hit and not milestone.get("tp1_hit"):
-            milestone["tp1_hit"] = True
-            milestone["tp1_price"] = current_price
-            milestone_changed = True
-
-        if decision.trailing_active and decision.new_stop is not None:
-            milestone["trailing_stop"] = decision.new_stop
-            milestone["trail_active"] = True
-            milestone_changed = True
-
-        if decision.new_stop and decision.new_stop != position.current_stop:
-            position.current_stop = decision.new_stop
-            await log_event(
-                db,
-                "STOP_UPDATED",
-                f"Stop updated to {decision.new_stop:.4f}",
-                asset_class=ASSET_CLASS,
-                symbol=position.symbol,
-                position_id=str(position.id),
-                source=AuditSource.WORKER,
-                event_data={"new_stop": decision.new_stop, "reason": decision.reason},
-            )
-
-        if milestone_changed:
-            position.milestone_state = milestone
+        if decision.new_stop is not None:
+            runner_phase = "trail_active" if decision.trailing_active else "breakeven"
+            if promote_floor(position, decision.new_stop, runner_phase, decision.reason, now=now):
+                await log_event(
+                    db,
+                    "STOP_UPDATED",
+                    f"Stop updated to {decision.new_stop:.4f}",
+                    asset_class=ASSET_CLASS,
+                    symbol=position.symbol,
+                    position_id=str(position.id),
+                    source=AuditSource.WORKER,
+                    event_data={"new_stop": decision.new_stop, "reason": decision.reason},
+                )
 
         if decision.partial and not tp1_already_hit:
             partial_qty = round((position.quantity or 0.0) * decision.partial_pct, 8)
@@ -227,16 +218,7 @@ class CryptoExitWorker:
                             except Exception:
                                 pass
 
-            milestone = {**(position.milestone_state or {})}
-            milestone["tp1_hit"] = True
-            milestone["tp1_price"] = current_price
-            milestone["protected_floor"] = position.current_stop
-            milestone["trailing_stop"] = position.current_stop
-            milestone["protection_mode"] = "break_even"
-            milestone["be_promoted"] = True
-            # When TP1 is executed we consider the dynamic trail to be active
-            milestone["trail_active"] = True
-            position.milestone_state = milestone
+            promote_tp1(position, current_price=current_price, now=now)
 
             await log_event(
                 db,

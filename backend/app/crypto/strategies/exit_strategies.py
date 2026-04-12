@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from app.services.runner_protection import get_effective_floor
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,14 @@ def _live_stop_hit(current_price: float, stop: float | None) -> bool:
 
 
 def _protective_floor(position) -> float | None:
-    stop = position.current_stop or position.initial_stop
+    milestone = position.milestone_state or {}
+    if milestone.get("tp1_hit"):
+        stop = milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop")
+        if stop is not None:
+            return float(stop)
+    stop = get_effective_floor(position)
+    if stop is None:
+        stop = position.current_stop or position.initial_stop
     if stop is None:
         return None
     return float(stop)
@@ -68,9 +77,10 @@ def _tp1_atr_trail_decision(position, current_price: float, ohlcv: list, atr_mul
     milestone = position.milestone_state or {}
     atr = _atr(ohlcv)
     tp1 = position.profit_target_1
+    tp1_hit = bool(milestone.get("tp1_hit") or getattr(position, "tp1_hit", False))
 
-    if milestone.get("tp1_hit"):
-        trail = float(milestone.get("trailing_stop", stop))
+    if tp1_hit:
+        trail = float(milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop", stop))
         if _live_stop_hit(current_price, trail):
             return ExitDecision(True, f"Trail stop hit at {trail:.4f}")
         if atr:
@@ -96,6 +106,12 @@ class FixedRiskDynamicFloor:
     name = "Fixed Risk then Dynamic Protective Floor"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
+        milestone = position.milestone_state or {}
+        if milestone.get("tp1_hit"):
+            trail = milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop")
+            if trail is not None and _live_stop_hit(current_price, float(trail)):
+                return ExitDecision(True, f"Trailing floor hit at {float(trail):.4f}")
+
         stop = _protective_floor(position)
         if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
@@ -118,6 +134,11 @@ class PartialAtTP1DynamicTrail:
         milestone = position.milestone_state or {}
         atr = _atr(ohlcv)
         tp1 = position.profit_target_1
+
+        if milestone.get("tp1_hit"):
+            trail = milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop") or stop
+            if trail is not None and _live_stop_hit(current_price, float(trail)):
+                return ExitDecision(True, f"Trail stop hit at {float(trail):.4f}")
 
         if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")

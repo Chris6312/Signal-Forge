@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from app.common.market_hours import is_near_eod as _is_near_eod
+from app.services.runner_protection import get_effective_floor
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +33,22 @@ def _atr_from_history(history: list[dict], period: int = 14) -> float:
 
 
 def _tp1_atr_trail_decision(position, current_price: float, history: list[dict], atr_multiplier: float = 1.0) -> Optional[StockExitDecision]:
-    stop = position.current_stop or position.initial_stop
-    entry = position.entry_price
     milestone = position.milestone_state or {}
+    if milestone.get("tp1_hit"):
+        stop = milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop")
+        if stop is None:
+            stop = get_effective_floor(position)
+    else:
+        stop = get_effective_floor(position)
+        if stop is None:
+            stop = position.current_stop or position.initial_stop
+    entry = position.entry_price
     atr = _atr_from_history(history)
     tp1 = position.profit_target_1
+    tp1_hit = bool(milestone.get("tp1_hit") or getattr(position, "tp1_hit", False))
 
-    if milestone.get("tp1_hit"):
-        trail = float(milestone.get("trailing_stop", stop))
+    if tp1_hit:
+        trail = float(milestone.get("highest_promoted_floor") or milestone.get("promoted_floor") or milestone.get("trailing_stop", stop))
         if current_price <= trail:
             return StockExitDecision(True, f"Trail stop hit at {trail:.2f}")
         if atr:

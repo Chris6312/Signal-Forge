@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, Index, String, DateTime, Float, Integer, Text, JSON, Enum as SAEnum
+from sqlalchemy import Column, Index, String, DateTime, Float, Integer, Text, JSON, Boolean, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -50,6 +50,16 @@ class Position(Base):
     current_stop = Column(Float, nullable=True)
     current_price = Column(Float, nullable=True)
     milestone_state = Column(JSON, nullable=True, default=dict)
+    protection_mode = Column(String(30), nullable=True)
+    initial_risk_price = Column(Float, nullable=True)
+    tp1_price = Column(Float, nullable=True)
+    tp1_hit = Column(Boolean, nullable=True, default=False)
+    break_even_floor = Column(Float, nullable=True)
+    promoted_floor = Column(Float, nullable=True)
+    highest_promoted_floor = Column(Float, nullable=True)
+    runner_phase = Column(String(30), nullable=True)
+    milestone_version = Column(String(20), nullable=True, default="runner_protection_v1")
+    last_protection_update_at = Column(DateTime, nullable=True)
 
     # Exit
     exit_price = Column(Float, nullable=True)

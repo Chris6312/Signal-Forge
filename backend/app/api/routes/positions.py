@@ -5,10 +5,12 @@ from uuid import UUID
 
 from app.api.deps import get_db_session
 from app.api.schemas.position import PositionOut
+from app.api.schemas.position_inspect import PositionInspectOut
 from app.api.schemas.order import OrderOut
 from app.common.models.position import Position, PositionState
 from app.common.models.order import Order
 from sqlalchemy.orm import selectinload
+from app.services.watchlist_service import build_position_inspect_payload
 
 router = APIRouter()
 
@@ -37,14 +39,14 @@ async def get_open_positions(db: AsyncSession = Depends(get_db_session)):
     return result.scalars().all()
 
 
-@router.get("/{position_id}", response_model=PositionOut)
+@router.get("/{position_id}", response_model=PositionInspectOut)
 async def get_position(position_id: str, db: AsyncSession = Depends(get_db_session)):
     stmt = select(Position).where(Position.id == UUID(position_id)).options(selectinload(Position.orders))
     result = await db.execute(stmt)
     pos = result.scalar_one_or_none()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
-    return pos
+    return build_position_inspect_payload(pos)
 
 
 @router.get("/{position_id}/orders", response_model=list[OrderOut])
