@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 
 from app.common.account_state import compute_drawdown_pct, should_block_new_entries
@@ -67,6 +68,18 @@ def _volatility_multiplier(volatility_pct: float) -> float:
     return 0.35
 
 
+def _coerce_non_negative_float(value) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not math.isfinite(result) or result < 0:
+        return None
+
+    return result
+
+
 def _resolve_volatility_multiplier(entry_value: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None, asset: str | None = None) -> tuple[float, str]:
     volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
     reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
@@ -83,15 +96,47 @@ def _resolve_volatility_multiplier(entry_value: float, volatility_pct: float | N
         except (TypeError, ValueError):
             pass
 
+    if volatility_value is None:
+        return 1.0, "none"
+
     return _volatility_multiplier(volatility_value), "legacy"
 
 
-def _extract_volatility_pct(entry_price: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None) -> float:
-    if volatility_pct is not None:
+def _extract_volatility_pct(entry_price: float, volatility_pct: float | None = None, signal=None, reasoning: dict | None = None) -> float | None:
+    explicit_value = _coerce_non_negative_float(volatility_pct)
+    if explicit_value is not None:
+        return explicit_value
+
+    reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
+    if not isinstance(reasoning_map, dict):
+        return None
+
+    for key in ("volatility_pct", "atr_pct"):
+        value = _coerce_non_negative_float(reasoning_map.get(key))
+        if value is not None:
+            return value
+
+    atr_value = _coerce_non_negative_float(reasoning_map.get("atr") or reasoning_map.get("atr_14") or reasoning_map.get("atr_recent"))
+    try:
+        price = float(entry_price)
+    except (TypeError, ValueError):
+        price = 0.0
+    if atr_value is not None and math.isfinite(price) and price > 0:
+        return atr_value / price
+
+    closes = reasoning_map.get("recent_closes") or reasoning_map.get("close_history") or reasoning_map.get("closes")
+    if isinstance(closes, (list, tuple)) and len(closes) >= 2:
         try:
-            return max(0.0, float(volatility_pct))
+            values = [float(value) for value in closes if value is not None]
         except (TypeError, ValueError):
-            return 0.0
+            values = []
+        values = [value for value in values if math.isfinite(value)]
+        if len(values) >= 2:
+            mean_close = statistics.fmean(values)
+            if mean_close > 0:
+                return statistics.pstdev(values) / mean_close if len(values) > 1 else 0.0
+
+    return None
 
 
 def _resolve_regime_aggressiveness_multiplier(signal=None, reasoning: dict | None = None) -> float:
@@ -100,40 +145,6 @@ def _resolve_regime_aggressiveness_multiplier(signal=None, reasoning: dict | Non
     if regime_value is None and isinstance(reasoning_map, dict):
         regime_value = reasoning_map.get("regime")
     return compute_regime_aggressiveness_multiplier(regime_value)
-
-    reasoning = reasoning or getattr(signal, "reasoning", None) or {}
-    for key in ("volatility_pct", "atr_pct"):
-        value = reasoning.get(key)
-        if value is not None:
-            try:
-                return max(0.0, float(value))
-            except (TypeError, ValueError):
-                pass
-
-    atr_value = reasoning.get("atr") or reasoning.get("atr_14") or reasoning.get("atr_recent")
-    try:
-        atr = float(atr_value) if atr_value is not None else 0.0
-    except (TypeError, ValueError):
-        atr = 0.0
-    try:
-        price = float(entry_price)
-    except (TypeError, ValueError):
-        price = 0.0
-    if atr > 0 and price > 0:
-        return atr / price
-
-    closes = reasoning.get("recent_closes") or reasoning.get("close_history") or reasoning.get("closes")
-    if isinstance(closes, (list, tuple)) and len(closes) >= 2:
-        try:
-            values = [float(value) for value in closes if value is not None]
-        except (TypeError, ValueError):
-            values = []
-        if len(values) >= 2:
-            mean_close = statistics.fmean(values)
-            if mean_close > 0:
-                return statistics.pstdev(values) / mean_close if len(values) > 1 else 0.0
-
-    return 0.0
 
 
 def compute_position_size(
@@ -239,6 +250,18 @@ def compute_position_size(
         final_size = float(int(final_size))
     else:
         final_size = round(final_size, 8)
+
+    risk_debug = {
+        "volatility_multiplier": vol_multiplier,
+        "drawdown_multiplier": dd_multiplier,
+        "cluster_multiplier": cluster_multiplier,
+        "concentration_multiplier": symbol_concentration_multiplier,
+        "regime_multiplier": regime_multiplier,
+        "effective_risk_multiplier": vol_multiplier * dd_multiplier * cluster_multiplier * symbol_concentration_multiplier * regime_multiplier,
+    }
+    reasoning_map = reasoning if isinstance(reasoning, dict) else getattr(signal, "reasoning", None)
+    if isinstance(reasoning_map, dict):
+        reasoning_map["risk_multipliers"] = risk_debug
 
     debug_payload = {
         "equity": equity_value,

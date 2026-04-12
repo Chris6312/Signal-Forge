@@ -1,7 +1,8 @@
-import pytest
 from types import SimpleNamespace
 
-from app.common.position_sizer import compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
+import pytest
+
+from app.common.position_sizer import _extract_volatility_pct, compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
 from app.common.portfolio_exposure import (
     compute_cluster_exposure_multiplier,
     compute_symbol_concentration_multiplier,
@@ -335,6 +336,55 @@ def test_volatility_multiplier_invalid_inputs_fall_back_to_one():
     assert compute_volatility_multiplier(atr=0.0, price=100.0, baseline_atr_percent=0.02) == pytest.approx(1.0)
     assert compute_volatility_multiplier(atr=2.0, price=0.0, baseline_atr_percent=0.02) == pytest.approx(1.0)
     assert compute_volatility_multiplier(atr=2.0, price=100.0, baseline_atr_percent=0.0) == pytest.approx(1.0)
+
+
+def test_explicit_volatility_pct_wins_over_fallbacks():
+    assert _extract_volatility_pct(
+        100.0,
+        volatility_pct=0.015,
+        reasoning={"volatility_pct": 0.025, "atr": 2.0},
+    ) == pytest.approx(0.015)
+
+
+def test_reasoning_volatility_pct_fallback_is_used():
+    assert _extract_volatility_pct(
+        100.0,
+        reasoning={"volatility_pct": 0.025, "atr": 2.0},
+    ) == pytest.approx(0.025)
+
+
+def test_atr_derived_volatility_pct_fallback_is_used():
+    assert _extract_volatility_pct(100.0, reasoning={"atr": 2.0}) == pytest.approx(0.02)
+
+
+def test_invalid_volatility_values_fall_through_to_later_fallbacks():
+    assert _extract_volatility_pct(
+        100.0,
+        volatility_pct="bad",
+        reasoning={"volatility_pct": "bad", "atr": 2.0},
+    ) == pytest.approx(0.02)
+
+
+def test_close_history_volatility_pct_fallback_is_used():
+    assert _extract_volatility_pct(100.0, reasoning={"recent_closes": [100.0, 110.0]}) == pytest.approx(5.0 / 105.0)
+
+
+def test_missing_volatility_sources_return_none():
+    assert _extract_volatility_pct(100.0, reasoning={}) is None
+
+
+def test_missing_volatility_sources_keep_position_size_neutral():
+    size = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+
+    assert size == pytest.approx(10.0)
 
 
 def test_extremely_small_equity_returns_zero():
