@@ -5,6 +5,7 @@ from app.crypto.strategies.entry_strategies import (
     _ema,
     _atr,
     _detect_regime,
+    _execution_readiness_metadata,
     MomentumBreakoutContinuation,
     PullbackReclaim,
     MeanReversionBounce,
@@ -282,4 +283,66 @@ def test_include_diagnostics_adds_crypto_execution_readiness_metadata():
     assert "execution_ready" in breakout.reasoning
     assert "execution_confidence_cap" in breakout.reasoning
     assert "execution_block_reason" in breakout.reasoning
+
+
+def test_crypto_execution_readiness_requires_acceptance_and_fast_support_stability():
+    accepted = _execution_readiness_metadata(
+        "breakout_retest",
+        {
+            "close": 112.0,
+            "previous_close": 111.0,
+            "current_vs_ema20": 4.5,
+            "reclaim_confirmed": True,
+            "breakout_acceptance_confirmed": True,
+            "support_extension_pct": 1.5,
+            "breakout_pct": 1.4,
+            "higher_closes_confirmed": True,
+            "three_ascending_closes": True,
+        },
+    )
+    rejected = _execution_readiness_metadata(
+        "breakout_retest",
+        {
+            "close": 112.0,
+            "previous_close": 112.0,
+            "current_vs_ema20": 4.5,
+            "reclaim_confirmed": False,
+            "breakout_acceptance_confirmed": False,
+            "support_extension_pct": 1.5,
+            "breakout_pct": 1.4,
+        },
+    )
+
+    assert accepted["execution_ready"] is True
+    assert rejected["execution_ready"] is False
+    assert rejected["execution_block_reason"] == "retest_acceptance_not_confirmed"
+
+
+def test_crypto_execution_readiness_suppresses_stretched_reclaim_and_continuation():
+    weak_reclaim = _execution_readiness_metadata(
+        "pullback_reclaim",
+        {
+            "close": 100.3,
+            "previous_close": 100.2,
+            "current_vs_ema20": 0.3,
+            "reclaim_confirmed": True,
+            "support_extension_pct": 0.12,
+        },
+    )
+    stretched_continuation = _execution_readiness_metadata(
+        "trend_continuation",
+        {
+            "close": 120.0,
+            "previous_close": 119.5,
+            "current_vs_ema20": 6.0,
+            "support_extension_pct": 4.8,
+            "higher_highs_confirmed": True,
+            "higher_lows_confirmed": True,
+        },
+    )
+
+    assert weak_reclaim["execution_ready"] is False
+    assert weak_reclaim["execution_block_reason"] == "reclaim_not_accepted"
+    assert stretched_continuation["execution_ready"] is False
+    assert stretched_continuation["execution_block_reason"] == "continuation_too_extended"
 

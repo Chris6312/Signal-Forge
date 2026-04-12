@@ -97,6 +97,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
     highs = _highs(primary)
     lows = _lows(primary)
     current = closes[-1]
+    previous_close = closes[-2] if len(closes) >= 2 else current
     atr = _atr_from_history(primary)
     regime = _detect_regime(primary)
 
@@ -174,10 +175,12 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
         if opening_range:
             opening_range_high = max(float(bar.get("high", 0) or 0) for bar in opening_range)
             opening_range_low = min(float(bar.get("low", 0) or 0) for bar in opening_range)
+            breakout_acceptance_confirmed = bool(current > opening_range_high and (previous_close > opening_range_high or current > previous_close))
             extra_reasoning.update({
                 "opening_range_high": round(opening_range_high, 6),
                 "opening_range_low": round(opening_range_low, 6),
                 "bars_in_session": len(session_bars),
+                "opening_range_acceptance_confirmed": breakout_acceptance_confirmed,
             })
     elif strategy_key == "volatility_compression_breakout":
         recent_slice = primary[-10:]
@@ -187,11 +190,13 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
             prior_atr_14 = _atr_from_history(prior_slice, period=min(14, max(1, len(prior_slice) - 1)))
             compression_high = max(float(x.get("high", 0) or 0) for x in recent_slice)
             compression_low = min(float(x.get("low", 0) or 0) for x in recent_slice)
+            compression_acceptance_confirmed = bool(current > compression_high and (previous_close > compression_high or current > previous_close))
             extra_reasoning.update({
                 "recent_atr_5": round(recent_atr_5, 6),
                 "prior_atr_14": round(prior_atr_14, 6),
                 "compression_high": round(compression_high, 6),
                 "compression_low": round(compression_low, 6),
+                "compression_acceptance_confirmed": compression_acceptance_confirmed,
             })
 
     return StockEntrySignal(
@@ -210,6 +215,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, p
             "strategy_key": strategy_key,
             "timeframe": f"{tf_minutes}m",
             "close": round(current, 6),
+            "previous_close": round(previous_close, 6),
             "atr": round(atr, 6),
             "ema9": round(ema9_last, 6) if ema9_last is not None else None,
             "ema20": round(ema20_last, 6) if ema20_last is not None else None,
@@ -721,6 +727,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
     ema50_now = ema50[-1] if ema50 else None
     current_vs_fast_support = (current - ema20_now) / max(ema20_now, 1e-6)
     weak_closes = sum(1 for close in closes[-4:-1] if close <= ema20_now)
+    breakout_acceptance = bool(reasoning.get("opening_range_acceptance_confirmed") or reasoning.get("compression_acceptance_confirmed"))
 
     def _result(ready: bool, cap: float, reason: str | None):
         return {
@@ -737,9 +744,13 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
             return _result(False, 0.45, "fast_support_lost_on_trigger_candle")
         if breakout_level and current <= breakout_level:
             return _result(False, 0.50, "breakout_acceptance_not_confirmed")
+        if breakout_level and previous <= breakout_level and current <= previous:
+            return _result(False, 0.50, "breakout_acceptance_not_confirmed")
         if current_vs_fast_support >= 0.045 or breakout_extension >= 0.03:
             return _result(False, 0.58, "opening_range_breakout_too_extended")
-        if current_vs_fast_support >= 0.025:
+        if not breakout_acceptance:
+            return _result(False, 0.60, "breakout_acceptance_not_confirmed")
+        if current_vs_fast_support >= 0.03 or breakout_extension >= 0.02:
             return _result(True, 0.62, None)
         if current <= previous or weak_closes >= 2:
             return _result(True, 0.60, None)
@@ -753,8 +764,12 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
             return _result(False, 0.45, "fast_support_lost_on_trigger_candle")
         if breakout_level and current <= breakout_level:
             return _result(False, 0.50, "breakout_acceptance_not_confirmed")
+        if breakout_level and previous <= breakout_level and current <= previous:
+            return _result(False, 0.50, "breakout_acceptance_not_confirmed")
         if current_vs_fast_support >= 0.05 or breakout_extension >= 0.04:
             return _result(False, 0.60, "compression_breakout_too_extended")
+        if not breakout_acceptance:
+            return _result(False, 0.60, "breakout_acceptance_not_confirmed")
         if current_vs_fast_support >= 0.03 or breakout_extension >= 0.025:
             return _result(True, 0.64, None)
         if current <= previous or weak_closes >= 2:
@@ -766,8 +781,10 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
             return _result(False, 0.50, "fast_support_lost_after_continuation")
         if current_vs_fast_support >= 0.06:
             return _result(False, 0.60, "continuation_too_extended")
-        if current_vs_fast_support >= 0.03:
+        if current_vs_fast_support >= 0.04:
             return _result(True, 0.78, None)
+        if current <= previous and weak_closes >= 1:
+            return _result(False, 0.58, "failed_follow_through")
         if current <= previous or weak_closes >= 2 or (ema50_now is not None and current <= ema50_now):
             return _result(True, 0.74, None)
         return _result(True, 0.88, None)

@@ -42,6 +42,7 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
     lows = _lows(ohlcv)
     volumes = _volumes(ohlcv)
     current = closes[-1] if closes else 0.0
+    previous_close = closes[-2] if len(closes) >= 2 else current
     atr = _atr(ohlcv) if len(ohlcv) >= 15 else 0.0
     regime = _detect_regime(ohlcv)
 
@@ -128,11 +129,19 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
         fallback_stop = round(min(retest_low, breakout_anchor) - atr * 0.5, 6)
         fallback_tp1 = round(current + atr * 2.0, 6)
 
+        breakout_acceptance_confirmed = bool(
+            breakout_anchor
+            and current > breakout_anchor
+            and (previous_close > breakout_anchor or current > previous_close)
+        )
+        support_extension_pct = round(((current - ema20[-1]) / max(ema20[-1], 1e-6)) * 100.0, 3) if ema20 else None
+
     reasoning = {
         "signal_schema_version": "v2",
         "strategy_key": strategy_key,
         "timeframe": f"{tf_minutes}m",
         "close": round(current, 6),
+        "previous_close": round(previous_close, 6),
         "atr": round(atr, 6),
         "ema9": round(ema9[-1], 6) if ema9 else None,
         "ema20": round(ema20[-1], 6) if ema20 else None,
@@ -187,6 +196,8 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
                 "prior_high_40": round(prior_high, 6) if prior_high else None,
                 "breakout_high_10": round(breakout_high, 6) if breakout_high else None,
                 "retest_low": round(retest_low, 6) if retest_low else None,
+                "breakout_acceptance_confirmed": breakout_acceptance_confirmed,
+                "support_extension_pct": support_extension_pct,
             }
         )
     return EntrySignal(
@@ -240,6 +251,8 @@ class EntrySignal:
 def _execution_readiness_metadata(strategy_key: str, reasoning: dict) -> dict:
     reasoning = reasoning or {}
     current_vs_ema20 = reasoning.get("current_vs_ema20")
+    previous_close = reasoning.get("previous_close")
+    ema20 = reasoning.get("ema20")
     ready = True
     confidence_cap = 1.0
     block_reason = None
@@ -247,33 +260,57 @@ def _execution_readiness_metadata(strategy_key: str, reasoning: dict) -> dict:
     def _apply(cap: float, reason: str | None = None, block: bool = False):
         nonlocal confidence_cap, ready, block_reason
         confidence_cap = min(confidence_cap, cap)
-        if reason:
+        if reason and block_reason is None:
             block_reason = reason
         if block:
             ready = False
 
     if strategy_key == "breakout_retest":
-        if reasoning.get("reclaim_confirmed") is False:
-            _apply(0.55, "retest_reclaim_unresolved")
+        support_extension_pct = reasoning.get("support_extension_pct")
+        breakout_acceptance_confirmed = reasoning.get("breakout_acceptance_confirmed")
+        breakout_extension_pct = reasoning.get("breakout_pct")
+
+        if reasoning.get("reclaim_confirmed") is False or breakout_acceptance_confirmed is False:
+            _apply(0.50, "retest_acceptance_not_confirmed", block=True)
         if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
             _apply(0.35, "below_fast_ema_support", block=True)
-        if not reasoning.get("higher_closes_confirmed") and not reasoning.get("three_ascending_closes"):
-            _apply(0.45, "weak_follow_through")
+        if previous_close is not None and reasoning.get("close") is not None and float(reasoning.get("close")) <= float(previous_close):
+            _apply(0.45, "weak_follow_through", block=True)
+        if support_extension_pct is not None and float(support_extension_pct) >= 3.5:
+            _apply(0.55, "retest_too_extended", block=True)
+        elif support_extension_pct is not None and float(support_extension_pct) >= 2.0:
+            _apply(0.62, "retest_mature_but_still_valid")
+        if breakout_extension_pct is not None and float(breakout_extension_pct) >= 3.0:
+            _apply(0.58, "breakout_maturity_requires_more_acceptance", block=True)
+        elif not reasoning.get("higher_closes_confirmed") and not reasoning.get("three_ascending_closes"):
+            _apply(0.70, "follow_through_not_fully_confirmed")
 
     elif strategy_key == "pullback_reclaim":
+        support_extension_pct = reasoning.get("support_extension_pct")
         if not reasoning.get("reclaim_confirmed"):
-            _apply(0.50, "reclaim_not_confirmed")
+            _apply(0.50, "reclaim_not_confirmed", block=True)
         if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
             _apply(0.40, "below_reclaim_cluster", block=True)
+        if previous_close is not None and reasoning.get("close") is not None and float(reasoning.get("close")) <= float(previous_close):
+            _apply(0.45, "weak_reclaim_bounce", block=True)
+        if support_extension_pct is not None and float(support_extension_pct) < 0.15:
+            _apply(0.60, "reclaim_not_accepted", block=True)
+        elif support_extension_pct is not None and float(support_extension_pct) >= 3.0:
+            _apply(0.62, "reclaim_too_extended", block=True)
 
     elif strategy_key == "trend_continuation":
+        support_extension_pct = reasoning.get("support_extension_pct")
         if current_vs_ema20 is not None and float(current_vs_ema20) <= 0:
             _apply(0.55, "fast_support_lost", block=True)
+        if support_extension_pct is not None and float(support_extension_pct) >= 4.5:
+            _apply(0.60, "continuation_too_extended", block=True)
+        elif support_extension_pct is not None and float(support_extension_pct) >= 2.0:
+            _apply(0.72, "continuation_mature_but_valid")
         if not reasoning.get("higher_highs_confirmed") or not reasoning.get("higher_lows_confirmed"):
-            _apply(0.80, "follow_through_not_fully_confirmed")
+            _apply(0.82, "follow_through_not_fully_confirmed")
         breakout_pct = reasoning.get("breakout_pct")
         if breakout_pct is not None and float(breakout_pct) < 0.5:
-            _apply(0.70, "breakout_extension_unproven")
+            _apply(0.72, "breakout_extension_unproven")
 
     return {
         "execution_ready": ready,

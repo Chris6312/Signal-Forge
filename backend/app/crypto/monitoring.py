@@ -81,13 +81,34 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
     ema20_now = ema20[-1]
     ema50_now = ema50[-1] if ema50 else None
     weak_closes = sum(1 for close in closes[-4:-1] if close <= ema20_now)
+    support_extension_pct = ((current - ema20_now) / max(ema20_now, 1e-6)) * 100.0
 
     if strategy_key == "breakout_retest":
+        breakout_level = float(reasoning.get("prior_high_40") or reasoning.get("breakout_high_10") or ema20_now)
+        breakout_extension_pct = ((current - breakout_level) / max(breakout_level, 1e-6)) * 100.0 if breakout_level else 0.0
+        acceptance_confirmed = bool(
+            reasoning.get("breakout_acceptance_confirmed")
+            if reasoning.get("breakout_acceptance_confirmed") is not None
+            else current > breakout_level and (previous > breakout_level or current > previous)
+        )
+
         if (ema9_now is not None and current <= ema9_now) or current <= ema20_now:
             return {
                 "execution_ready": False,
                 "confidence_cap": min(confidence_cap, 0.40),
                 "block_reason": "lower_timeframe_reclaim_unresolved",
+            }
+        if not acceptance_confirmed or not bool(reasoning.get("reclaim_confirmed", True)):
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.50),
+                "block_reason": "retest_acceptance_not_confirmed",
+            }
+        if previous is not None and current <= previous:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.45),
+                "block_reason": "weak_follow_through",
             }
         if weak_closes >= 2:
             return {
@@ -95,8 +116,14 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
                 "confidence_cap": min(confidence_cap, 0.45),
                 "block_reason": "repeated_weak_closes_below_fast_support",
             }
-        if current <= previous:
-            confidence_cap = min(confidence_cap, 0.60)
+        if support_extension_pct >= 3.5 or breakout_extension_pct >= 3.0:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.55),
+                "block_reason": "retest_too_extended",
+            }
+        if support_extension_pct >= 2.0 or breakout_extension_pct >= 2.0:
+            confidence_cap = min(confidence_cap, 0.62)
         elif ema50_now is not None and current <= ema50_now:
             confidence_cap = min(confidence_cap, 0.65)
         else:
@@ -109,11 +136,30 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
 
     if strategy_key == "pullback_reclaim":
         true_reclaim = current > ema20_now and (ema9_now is None or current > ema9_now) and previous <= ema20_now
+        support_extension_pct = ((current - ema20_now) / max(ema20_now, 1e-6)) * 100.0
         if not true_reclaim:
             return {
                 "execution_ready": False,
                 "confidence_cap": min(confidence_cap, 0.50),
                 "block_reason": "true_reclaim_not_confirmed",
+            }
+        if current <= previous:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.45),
+                "block_reason": "weak_reclaim_bounce",
+            }
+        if support_extension_pct < 0.15:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.60),
+                "block_reason": "reclaim_not_accepted",
+            }
+        if support_extension_pct >= 3.0:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.62),
+                "block_reason": "reclaim_too_extended",
             }
         confidence_cap = min(confidence_cap, 0.72)
         return {
@@ -139,7 +185,15 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
                 "confidence_cap": min(confidence_cap, 0.55),
                 "block_reason": "fast_support_lost_after_breakout",
             }
-        if current <= previous:
+        if support_extension_pct >= 4.5:
+            return {
+                "execution_ready": False,
+                "confidence_cap": min(confidence_cap, 0.60),
+                "block_reason": "continuation_too_extended",
+            }
+        if support_extension_pct >= 2.0:
+            confidence_cap = min(confidence_cap, 0.72)
+        elif current <= previous:
             confidence_cap = min(confidence_cap, 0.80)
         else:
             confidence_cap = min(confidence_cap, 0.90)

@@ -10,6 +10,7 @@ from app.stocks.strategies.entry_strategies import (
     PullbackReclaim,
     TrendContinuationLadder,
     MeanReversionBounce,
+    VolatilityCompressionBreakout,
     StockEntrySignal,
     evaluate_all,
 )
@@ -284,7 +285,25 @@ class TestExecutionReadinessAdjustment:
         assert adjustment["execution_ready"] is False
         assert adjustment["block_reason"] == "opening_range_breakout_too_extended"
 
-    def test_volatility_compression_breakout_is_capped_until_clean_acceptance(self):
+    def test_opening_range_breakout_requires_clean_acceptance_before_execution(self):
+        signal = StockEntrySignal(
+            strategy="Opening Range Breakout",
+            symbol="AAPL",
+            entry_price=105.5,
+            initial_stop=100.0,
+            profit_target_1=112.0,
+            profit_target_2=118.0,
+            regime="trending_up",
+            confidence=0.92,
+            reasoning={"opening_range_high": 104.5, "recent_high_20": 104.5},
+        )
+
+        adjustment = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=105.5)})
+
+        assert adjustment["execution_ready"] is False
+        assert adjustment["block_reason"] == "breakout_acceptance_not_confirmed"
+
+    def test_volatility_compression_breakout_requires_clean_acceptance_before_execution(self):
         signal = StockEntrySignal(
             strategy="Volatility Compression Breakout",
             symbol="AAPL",
@@ -298,9 +317,49 @@ class TestExecutionReadinessAdjustment:
         )
         adjustment = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=107.0)})
 
-        assert adjustment["execution_ready"] is True
-        assert adjustment["confidence_cap"] < signal.confidence
-        assert adjustment["confidence_cap"] == pytest.approx(0.64)
+        assert adjustment["execution_ready"] is False
+        assert adjustment["block_reason"] == "breakout_acceptance_not_confirmed"
+
+        confirmed_signal = StockEntrySignal(
+            strategy="Volatility Compression Breakout",
+            symbol="AAPL",
+            entry_price=107.0,
+            initial_stop=100.0,
+            profit_target_1=115.0,
+            profit_target_2=120.0,
+            regime="trending_up",
+            confidence=0.92,
+            reasoning={
+                "compression_high_10": 105.0,
+                "compression_low_10": 98.0,
+                "compression_acceptance_confirmed": True,
+            },
+        )
+        confirmed_adjustment = _execution_readiness_adjustment(confirmed_signal, {"5m": trending_up_history(20, start=100.0, end=107.0)})
+
+        assert confirmed_adjustment["execution_ready"] is True
+        assert confirmed_adjustment["confidence_cap"] < confirmed_signal.confidence
+
+    def test_volatility_compression_breakout_blocks_late_chases_even_after_acceptance(self):
+        signal = StockEntrySignal(
+            strategy="Volatility Compression Breakout",
+            symbol="AAPL",
+            entry_price=120.0,
+            initial_stop=100.0,
+            profit_target_1=125.0,
+            profit_target_2=130.0,
+            regime="trending_up",
+            confidence=0.92,
+            reasoning={
+                "compression_high_10": 105.0,
+                "compression_low_10": 98.0,
+                "compression_acceptance_confirmed": True,
+            },
+        )
+        adjustment = _execution_readiness_adjustment(signal, {"5m": trending_up_history(20, start=100.0, end=120.0)})
+
+        assert adjustment["execution_ready"] is False
+        assert adjustment["block_reason"] == "compression_breakout_too_extended"
 
     def test_trend_continuation_ladder_caps_or_blocks_on_extension_and_support_loss(self):
         signal = StockEntrySignal(

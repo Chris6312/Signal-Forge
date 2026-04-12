@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.api.routes import monitoring as monitoring_route
 from app.api.routes.monitoring import _select_top_signal, _strategy_key, get_monitoring_candidates
-from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal
+from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal, _execution_readiness_adjustment as crypto_execution_readiness_adjustment
 from app.stocks.monitoring import StockMonitor, _select_top_signal as stock_select_top_signal
+from app.stocks.strategies.entry_strategies import _execution_readiness_adjustment as stock_execution_readiness_adjustment
 from tests.conftest import make_bar, make_candle, trending_down_ohlcv, trending_up_history, trending_up_ohlcv
 
 
@@ -95,6 +96,34 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
 
     assert create_position.await_count == 1
     assert create_position.await_args.args[2] is second
+
+
+def test_stock_and_crypto_extension_handling_is_directionally_consistent():
+    stock_signal = SimpleNamespace(
+        strategy="Opening Range Breakout",
+        strategy_key="opening_range_breakout",
+        confidence=0.92,
+        reasoning={"opening_range_high": 104.0, "opening_range_acceptance_confirmed": True},
+    )
+    crypto_signal = SimpleNamespace(
+        strategy="breakout_retest",
+        strategy_key="breakout_retest",
+        confidence=0.91,
+        reasoning={"prior_high_40": 104.0, "breakout_acceptance_confirmed": True, "reclaim_confirmed": True},
+    )
+
+    stock_moderate = stock_execution_readiness_adjustment(stock_signal, {"5m": trending_up_history(20, start=100.0, end=105.5)})
+    stock_extended = stock_execution_readiness_adjustment(stock_signal, {"5m": trending_up_history(20, start=100.0, end=120.0)})
+
+    crypto_moderate = crypto_execution_readiness_adjustment(crypto_signal, {"15m": trending_up_ohlcv(20, start=100.0, end=105.5)})
+    crypto_extended = crypto_execution_readiness_adjustment(crypto_signal, {"15m": trending_up_ohlcv(20, start=100.0, end=120.0)})
+
+    assert stock_moderate["execution_ready"] is True
+    assert stock_extended["execution_ready"] is False
+    assert crypto_moderate["execution_ready"] is True
+    assert crypto_extended["execution_ready"] is False
+    assert stock_moderate["confidence_cap"] < stock_signal.confidence
+    assert crypto_moderate["confidence_cap"] < crypto_signal.confidence
 
 
 @pytest.mark.asyncio
@@ -232,7 +261,7 @@ async def test_stock_monitor_caps_volatility_compression_breakout_before_executi
         strategy="Volatility Compression Breakout",
         strategy_key="volatility_compression_breakout",
         confidence=0.92,
-        reasoning={"compression_high_10": 105.0, "compression_low_10": 98.0},
+        reasoning={"compression_high_10": 105.0, "compression_low_10": 98.0, "compression_acceptance_confirmed": True},
     )
 
     captured = {}
@@ -254,12 +283,12 @@ async def test_stock_monitor_caps_volatility_compression_breakout_before_executi
     )
     monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
-    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_history(20, start=100.0, end=107.0))
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_history(20, start=100.0, end=105.5))
 
     await monitor._evaluate_symbol(db, ws)
 
     assert create_position.await_count == 1
-    assert captured["confidence"] == pytest.approx(0.64)
+    assert captured["confidence"] < 0.92
 
 
 @pytest.mark.asyncio
@@ -323,7 +352,7 @@ async def test_crypto_monitor_evaluates_once_per_new_15m_trigger_candle(monkeypa
     monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
     monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: current_ts["value"])
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {"last_close_ts": current_ts["value"]})
-    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_ohlcv(30, start=100.0, end=120.0))
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_up_ohlcv(30, start=100.0, end=112.0))
 
     await monitor._evaluate_symbol(db, ws)
     await monitor._evaluate_symbol(db, ws)
@@ -399,9 +428,9 @@ async def test_crypto_monitor_caps_pullback_reclaim_until_true_reclaim_confirmed
     monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
     monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
 
-    pullback = trending_up_ohlcv(30, start=100.0, end=110.0)
+    pullback = trending_up_ohlcv(30, start=100.0, end=108.0)
     pullback[-2] = make_candle(28, 103.0)
-    pullback[-1] = make_candle(29, 109.5)
+    pullback[-1] = make_candle(29, 107.0)
     monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: pullback)
 
     await monitor._evaluate_symbol(db, ws)
