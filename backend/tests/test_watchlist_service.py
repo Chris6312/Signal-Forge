@@ -145,6 +145,8 @@ def test_build_position_inspect_payload_preserves_frozen_policy_and_milestone_st
 
     payload = build_position_inspect_payload(position)
 
+    assert payload["state"] == "OPEN"
     assert payload["frozen_policy"] == frozen_policy
     assert payload["milestone_state"] == milestone_state
+    assert payload["management_policy_version"] == "1.0"
     assert payload["max_hold_hours"] == 36
