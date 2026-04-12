@@ -8,6 +8,8 @@ DEFAULT_RISK_PER_TRADE_PCT: dict[str, float] = {
     "crypto": 0.004,
 }
 
+DEFAULT_BASELINE_ATR_PERCENT = 0.02
+
 
 def _coerce_float(value, default: float) -> float:
     try:
@@ -36,6 +38,20 @@ def get_default_risk_per_trade_pct(asset_class: str | None = None) -> float:
     if global_override is not None:
         return _coerce_float(global_override, DEFAULT_RISK_PER_TRADE_PCT.get(asset, 0.005))
     return DEFAULT_RISK_PER_TRADE_PCT.get(asset, 0.005)
+
+
+def get_default_baseline_atr_percent() -> float:
+    return _coerce_float(os.getenv("BASELINE_ATR_PERCENT"), DEFAULT_BASELINE_ATR_PERCENT)
+
+
+def resolve_baseline_atr_percent(runtime_override=None) -> float:
+    if isinstance(runtime_override, dict):
+        value = runtime_override.get("baseline_atr_percent")
+        if value is not None:
+            return _coerce_float(value, get_default_baseline_atr_percent())
+    if runtime_override is not None:
+        return _coerce_float(runtime_override, get_default_baseline_atr_percent())
+    return get_default_baseline_atr_percent()
 
 
 def resolve_risk_per_trade_pct(asset_class: str | None = None, runtime_override=None) -> float:

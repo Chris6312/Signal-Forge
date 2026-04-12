@@ -4,10 +4,34 @@ import logging
 import statistics
 
 from app.common.account_state import compute_drawdown_pct, drawdown_multiplier, should_block_new_entries
-from app.common.risk_config import normalize_asset_class, resolve_risk_per_trade_pct
+from app.common.risk_config import normalize_asset_class, resolve_baseline_atr_percent, resolve_risk_per_trade_pct
 
 
 logger = logging.getLogger(__name__)
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def compute_volatility_multiplier(atr: float, price: float, baseline_atr_percent: float) -> float:
+    try:
+        atr_value = float(atr)
+        price_value = float(price)
+        baseline_value = float(baseline_atr_percent)
+    except (TypeError, ValueError):
+        return 1.0
+
+    if atr_value <= 0 or price_value <= 0 or baseline_value <= 0:
+        return 1.0
+
+    atr_percent = atr_value / price_value
+    vol_ratio = atr_percent / baseline_value
+    if vol_ratio <= 0:
+        return 1.0
+
+    multiplier = 1.0 / vol_ratio
+    return _clamp(multiplier, 0.5, 1.5)
 
 
 def _volatility_multiplier(volatility_pct: float) -> float:
@@ -94,7 +118,19 @@ def compute_position_size(
 
     base_position_size = (equity_value * risk_pct_value) / stop_value
     volatility_value = _extract_volatility_pct(entry_value, volatility_pct=volatility_pct, signal=signal, reasoning=reasoning)
-    vol_multiplier = _volatility_multiplier(volatility_value)
+    reasoning_map = reasoning or getattr(signal, "reasoning", None) or {}
+    atr_value = reasoning_map.get("atr") or reasoning_map.get("atr_14") or reasoning_map.get("atr_recent")
+    if atr_value is not None:
+        try:
+            vol_multiplier = compute_volatility_multiplier(
+                atr=float(atr_value),
+                price=entry_value,
+                baseline_atr_percent=resolve_baseline_atr_percent(),
+            )
+        except (TypeError, ValueError):
+            vol_multiplier = _volatility_multiplier(volatility_value)
+    else:
+        vol_multiplier = _volatility_multiplier(volatility_value)
     peak_value = float(peak_equity if peak_equity is not None else current_equity if current_equity is not None else equity_value)
     current_value = float(current_equity if current_equity is not None else equity_value)
     drawdown_pct = compute_drawdown_pct(current_value, peak_value)
