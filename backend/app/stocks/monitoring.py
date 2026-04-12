@@ -30,6 +30,39 @@ ASSET_CLASS = "stock"
 COOLDOWN_KEY_PREFIX = "cooldown:stock:"
 
 
+def _strategy_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.strip().lower().replace(" ", "_")
+
+
+def _signal_key(signal) -> str | None:
+    return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _extract_signals(result):
+    if isinstance(result, dict):
+        return result.get("signals") or []
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def _select_top_signal(result):
+    signals = _extract_signals(result)
+    if not signals:
+        return None
+
+    top_strategy = result.get("top_strategy") if isinstance(result, dict) else None
+    top_key = _strategy_key(top_strategy)
+    if top_key:
+        for signal in signals:
+            if _signal_key(signal) == top_key:
+                return signal
+
+    return signals[0]
+
+
 class StockMonitor:
     def __init__(self):
         self._store = CandleStore()
@@ -146,11 +179,14 @@ class StockMonitor:
         except Exception:
             pass
 
-        signals = evaluate_all(ws.symbol, candles_by_tf)
+        signals = evaluate_all(ws.symbol, candles_by_tf, include_diagnostics=True)
+        signals = _extract_signals(signals)
         if not signals:
             return
 
-        best = signals[0]
+        best = _select_top_signal(signals)
+        if not best:
+            return
         logger.info("Stock entry signal: %s via %s (confidence=%.2f)", ws.symbol, best.strategy, best.confidence)
 
         current_count = await self._count_open_positions(db)

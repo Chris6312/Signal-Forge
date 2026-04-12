@@ -38,6 +38,31 @@ def _extract_signals(result):
     return []
 
 
+def _strategy_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.strip().lower().replace(" ", "_")
+
+
+def _signal_key(signal) -> str | None:
+    return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _select_top_signal(result):
+    signals = _extract_signals(result)
+    if not signals:
+        return None
+
+    top_strategy = result.get("top_strategy") if isinstance(result, dict) else None
+    top_key = _strategy_key(top_strategy)
+    if top_key:
+        for signal in signals:
+            if _signal_key(signal) == top_key:
+                return signal
+
+    return signals[0]
+
+
 class CryptoMonitor:
     def __init__(self):
         self._store = CandleStore()
@@ -147,7 +172,7 @@ class CryptoMonitor:
             "daily": self._store.get(can, TF_MINUTES["daily"]),
         }
 
-        eval_result = evaluate_all(can, candles_by_tf)
+        eval_result = evaluate_all(can, candles_by_tf, include_diagnostics=True)
         signals = _extract_signals(eval_result)
         if not signals:
             try:
@@ -158,7 +183,9 @@ class CryptoMonitor:
                 pass
             return
 
-        best = signals[0]
+        best = _select_top_signal(eval_result)
+        if not best:
+            return
         logger.info(
             "Entry signal for %s: %s (confidence=%.2f)",
             can, best.strategy, best.confidence

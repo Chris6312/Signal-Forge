@@ -113,14 +113,44 @@ const STRATEGY_LABEL_TO_KEY: Record<string, string> = Object.fromEntries(
   Object.entries(STRATEGY_KEY_TO_LABEL).map(([key, label]) => [label, key]),
 )
 
+function normalizeStrategyKey(strategy: string | null | undefined): string | null {
+  if (!strategy) return null
+  const trimmed = strategy.trim()
+  return STRATEGY_LABEL_TO_KEY[trimmed] ?? trimmed.toLowerCase().replace(/ /g, '_')
+}
+
 function inferStrategyKey(strategyLabel: string): string {
   return STRATEGY_LABEL_TO_KEY[strategyLabel] ?? strategyLabel.toLowerCase().replace(/ /g, '_')
+}
+
+function resolveSelectedStrategyKey(result: EvalResult | null): string | null {
+  if (!result) return null
+
+  const backendTop = normalizeStrategyKey(result.top_strategy)
+  if (backendTop) return backendTop
+
+  const evaluatedScores = result.evaluated_strategy_scores ?? {}
+  const evaluatedEntries = Object.entries(evaluatedScores)
+  if (evaluatedEntries.length > 0) {
+    return evaluatedEntries.reduce((best, current) => {
+      if (!best) return current[0]
+      const bestScore = evaluatedScores[best]
+      const currentScore = current[1]
+      if (currentScore > bestScore) return current[0]
+      if (currentScore === bestScore && current[0] < best) return current[0]
+      return best
+    }, '') || null
+  }
+
+  const topSignal = result.signals[0]
+  return normalizeStrategyKey(topSignal?.strategy_key ?? topSignal?.strategy ?? null)
 }
 
 function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCardData[] {
   if (!result) return []
 
   const regimeFallback = result.signals[0]?.regime ?? null
+  const selectedStrategyKey = resolveSelectedStrategyKey(result)
 
   if (result.evaluated_strategy_scores && Object.keys(result.evaluated_strategy_scores).length > 0) {
     const cards = Object.entries(result.evaluated_strategy_scores)
@@ -130,9 +160,7 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
         confidence,
         regime: regimeFallback,
         evaluation: result.evaluated_strategies?.[strategyKey],
-        selected:
-          (result.top_strategy && inferStrategyKey(result.top_strategy) === strategyKey) ||
-          false,
+        selected: selectedStrategyKey === strategyKey,
       }))
       .sort((a, b) => b.confidence - a.confidence)
 
@@ -165,9 +193,7 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
         confidence: sig.confidence,
         regime: sig.regime,
         evaluation,
-        selected:
-          (result.top_strategy && inferStrategyKey(result.top_strategy) === strategyKey) ||
-          false,
+        selected: selectedStrategyKey === strategyKey,
       }
     })
     .sort((a, b) => b.confidence - a.confidence)
@@ -263,6 +289,10 @@ export default function Monitoring() {
   }, [evalSymbol, evalClass])
 
   const diagnosticCards = useMemo(() => normalizeStrategyCards(evalResult), [evalResult])
+  const selectedDiagnostic = useMemo(
+    () => diagnosticCards.find((card) => card.selected) ?? diagnosticCards[0] ?? null,
+    [diagnosticCards],
+  )
 
   const columns = useMemo(() => [
     columnHelper.accessor('symbol', {
@@ -461,6 +491,17 @@ export default function Monitoring() {
               <div className="space-y-3">
                 <div className="text-[10px] text-gray-500 mono uppercase tracking-widest">
                   Strategy Diagnostics ({diagnosticCards.length})
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 mono text-[10px] uppercase tracking-widest text-gray-300">
+                  <span className="text-gray-500">Backend Winner</span>
+                  <span className="text-white font-bold">{selectedDiagnostic?.strategyLabel ?? '—'}</span>
+                  <span className="text-gray-500">@</span>
+                  <span className="text-system-online font-bold">
+                    {typeof (evalResult.top_confidence ?? selectedDiagnostic?.confidence) === 'number'
+                      ? `${((evalResult.top_confidence ?? selectedDiagnostic?.confidence ?? 0) * 100).toFixed(0)}%`
+                      : '—'}
+                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

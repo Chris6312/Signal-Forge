@@ -19,6 +19,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _strategy_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.strip().lower().replace(" ", "_")
+
+
+def _signal_key(signal) -> str | None:
+    return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _select_top_signal(signals, top_strategy: str | None):
+    if not signals:
+        return None
+
+    top_key = _strategy_key(top_strategy)
+    if top_key:
+        for signal in signals:
+            if _signal_key(signal) == top_key:
+                return signal
+
+    return signals[0]
+
+
 def _normalize_eval_result(result) -> dict:
     if isinstance(result, Mapping):
         signals = result.get("signals", [])
@@ -129,8 +152,9 @@ async def get_monitoring_candidates(
 
             normalized = _normalize_eval_result(raw_result)
             signals = normalized["signals"]
+            top_signal = _select_top_signal(signals, normalized["top_strategy"])
             return {
-                "top_signal": signals[0] if signals else None,
+                "top_signal": top_signal,
                 "diagnostics": normalized,
             }
         except Exception as exc:
@@ -150,12 +174,19 @@ async def get_monitoring_candidates(
         evaluation_error = None
         top_notes = None
         position_or_order_status = None
+        backend_top_strategy = None
+        backend_top_confidence = None
 
         if isinstance(sig, Exception):
             evaluation_error = str(sig)
             sig_obj = None
         else:
             sig_obj = sig.get("top_signal") if isinstance(sig, dict) else None
+            diagnostics = sig.get("diagnostics") if isinstance(sig, dict) else None
+            backend_top_strategy = diagnostics.get("top_strategy") if isinstance(diagnostics, dict) else None
+            backend_top_confidence = diagnostics.get("top_confidence") if isinstance(diagnostics, dict) else None
+            if diagnostics and isinstance(diagnostics, dict):
+                sig_obj = _select_top_signal(diagnostics.get("signals") or [], backend_top_strategy) or sig_obj
 
         try:
             stmt = select(Position).where(
@@ -209,8 +240,8 @@ async def get_monitoring_candidates(
             "state": ws.state,
             "added_at": ws.added_at.isoformat() if ws.added_at else None,
             "watchlist_source_id": ws.watchlist_source_id,
-            "top_strategy": (sig.get("top_strategy") if isinstance(sig, dict) else None) or (sig_obj.strategy if sig_obj else None),
-            "top_confidence": (sig.get("top_confidence") if isinstance(sig, dict) else None) or (sig_obj.confidence if sig_obj else None),
+            "top_strategy": backend_top_strategy or (sig_obj.strategy if sig_obj else None),
+            "top_confidence": backend_top_confidence if backend_top_confidence is not None else (sig_obj.confidence if sig_obj else None),
             "top_entry": sig_obj.entry_price if sig_obj else None,
             "blocked_reason": blocked_reason,
             "has_open_position": has_open_position,
