@@ -21,6 +21,9 @@ class PositionInspectOut(BaseModel):
     profit_target_1: float | None = None
     profit_target_2: float | None = None
     max_hold_hours: int | None = None
+    hours_held: float | None = None
+    hold_ratio: float | None = None
+    time_risk_state: str | None = None
     regime_at_entry: str | None = None
     watchlist_source_id: str | None = None
     management_policy_version: str | None = None

@@ -36,6 +36,10 @@ interface Position {
   exit_strategy: string | null
   pnl_realized: number | null
   fees_paid: number | null
+  max_hold_hours?: number | null
+  hours_held?: number | null
+  hold_ratio?: number | null
+  time_risk_state?: string | null
   regime_at_entry: string | null
   watchlist_source_id?: string | null
   management_policy_version?: string | null
@@ -63,6 +67,28 @@ function formatPnL(val: number | null | undefined) {
   if (val == null) return '0.00'
   const formatted = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(val))
   return val >= 0 ? `+${formatted}` : `-${formatted}`
+}
+
+function formatHoldHours(value: number | null | undefined) {
+  if (value == null) return 'Not set'
+  const rounded = Math.round(value)
+  return `${rounded} hour${rounded === 1 ? '' : 's'}`
+}
+
+function formatHeldHours(value: number) {
+  const fixed = value.toFixed(1)
+  return `${fixed} hour${fixed === '1.0' ? '' : 's'}`
+}
+
+function holdColorClass(state?: string | null, ratio?: number | null) {
+  const normalized = state?.toLowerCase()
+  if (normalized === 'green') return 'text-system-online drop-shadow-[0_0_8px_rgba(16,185,129,0.25)]'
+  if (normalized === 'yellow') return 'text-amber-300 drop-shadow-[0_0_8px_rgba(245,158,11,0.25)]'
+  if (normalized === 'red') return 'text-system-offline drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]'
+  if (typeof ratio !== 'number') return 'text-gray-300'
+  if (ratio < 0.7) return 'text-system-online drop-shadow-[0_0_8px_rgba(16,185,129,0.25)]'
+  if (ratio < 0.9) return 'text-amber-300 drop-shadow-[0_0_8px_rgba(245,158,11,0.25)]'
+  return 'text-system-offline drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]'
 }
 
 export default function Positions() {
@@ -231,6 +257,8 @@ export default function Positions() {
                   (milestone?.trailing_stop) ||
                   (tp1Hit && strategyIndicatesDynamicTrail)
                 )
+                const hoursHeld = row.original.hours_held ?? 0
+                const hoursHeldColor = holdColorClass(row.original.time_risk_state, row.original.hold_ratio)
                 return (
                   <React.Fragment key={row.id}>
                     <tr 
@@ -266,6 +294,12 @@ export default function Positions() {
                                 <div className="ml-2">Current: {formatCurrency(row.original.current_stop)}</div>
                                 <div className="ml-2">TP1 Hit: {tp1Hit ? 'YES' : 'NO'}</div>
                                 <div className="ml-2">Trail Active: {trailActive ? 'YES' : 'NO'}</div>
+                                <div className="ml-2">Max Hours: {formatHoldHours(row.original.max_hold_hours)}</div>
+                                <div className="ml-2">
+                                  Hours Held: <span className={clsx(hoursHeldColor, 'transition-colors duration-300')}>
+                                    {formatHeldHours(hoursHeld)}
+                                  </span>
+                                </div>
                                 {trailActive && milestone?.trailing_stop && (
                                   <div className="ml-2 text-[11px] text-gray-300">Trailing Stop: {formatCurrency(Number(milestone.trailing_stop))}</div>
                                 )}

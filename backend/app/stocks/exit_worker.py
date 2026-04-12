@@ -18,6 +18,7 @@ from app.stocks.tradier_client import tradier_client
 from app.stocks.strategies.exit_strategies import evaluate_exit
 from app.stocks.ledger import stock_ledger
 from app.common.models.ledger import LedgerEntry
+from app.common.position_time import compute_position_hold_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -94,15 +95,14 @@ class StockExitWorker:
             hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
         except Exception:
             hard_flag = False
-        if hard_flag and position.max_hold_hours and position.entry_time:
-            elapsed_hours = (now - position.entry_time).total_seconds() / 3600
-            if elapsed_hours >= position.max_hold_hours:
-                await self._close_position(
-                    db, position, current_price,
-                    f"Hard max hold time exceeded ({position.max_hold_hours}h)", now,
-                )
-                position.updated_at = now
-                return
+        hold_metrics = compute_position_hold_metrics(position.entry_time, position.max_hold_hours, now=now)
+        if hard_flag and hold_metrics.max_hold_hours and hold_metrics.hours_held >= hold_metrics.max_hold_hours:
+            await self._close_position(
+                db, position, current_price,
+                f"Hard max hold time exceeded ({int(hold_metrics.max_hold_hours)}h)", now,
+            )
+            position.updated_at = now
+            return
 
         try:
             history = await tradier_client.get_history(position.symbol, interval="daily")

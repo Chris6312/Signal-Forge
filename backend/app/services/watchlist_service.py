@@ -1,10 +1,15 @@
 from typing import Any
 
+from app.common.position_time import compute_position_hold_metrics
 from app.services.runner_protection import get_protection_snapshot
 
 
 def build_position_inspect_payload(position: Any) -> dict[str, Any]:
     snapshot = get_protection_snapshot(position)
+    hold_metrics = compute_position_hold_metrics(
+        getattr(position, "entry_time", None),
+        getattr(position, "max_hold_hours", None),
+    )
     milestone_state = getattr(position, "milestone_state", None)
     return {
         "id": getattr(position, "id", None),
@@ -21,7 +26,7 @@ def build_position_inspect_payload(position: Any) -> dict[str, Any]:
         "current_stop": getattr(position, "current_stop", None),
         "profit_target_1": getattr(position, "profit_target_1", None),
         "profit_target_2": getattr(position, "profit_target_2", None),
-        "max_hold_hours": getattr(position, "max_hold_hours", None),
+        **hold_metrics.as_dict(),
         "regime_at_entry": getattr(position, "regime_at_entry", None),
         "watchlist_source_id": getattr(position, "watchlist_source_id", None),
         "management_policy_version": getattr(position, "management_policy_version", None),
