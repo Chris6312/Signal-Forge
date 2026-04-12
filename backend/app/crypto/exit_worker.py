@@ -86,6 +86,19 @@ class CryptoExitWorker:
                 (current_price - position.entry_price) * position.quantity
             )
 
+        active_floor = position.current_stop or position.initial_stop
+        milestone = {**(position.milestone_state or {})}
+        if active_floor is not None and current_price <= float(active_floor):
+            await self._close_position(
+                db,
+                position,
+                current_price,
+                f"Stop hit at {float(active_floor):.4f}",
+                now,
+            )
+            position.updated_at = now
+            return
+
         try:
             hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
         except Exception:
@@ -106,9 +119,8 @@ class CryptoExitWorker:
             ohlcv = []
 
         decision = evaluate_exit(position, current_price, ohlcv)
-
-        milestone = {**(position.milestone_state or {})}
         milestone_changed = False
+        tp1_already_hit = bool((position.milestone_state or {}).get("tp1_hit"))
 
         if decision.tp1_hit and not milestone.get("tp1_hit"):
             milestone["tp1_hit"] = True
@@ -136,7 +148,7 @@ class CryptoExitWorker:
         if milestone_changed:
             position.milestone_state = milestone
 
-        if decision.partial and not (position.milestone_state or {}).get("tp1_hit"):
+        if decision.partial and not tp1_already_hit:
             partial_qty = round((position.quantity or 0.0) * decision.partial_pct, 8)
             partial_pnl = 0.0
             if position.entry_price and partial_qty > 0:
@@ -218,7 +230,10 @@ class CryptoExitWorker:
             milestone = {**(position.milestone_state or {})}
             milestone["tp1_hit"] = True
             milestone["tp1_price"] = current_price
+            milestone["protected_floor"] = position.current_stop
             milestone["trailing_stop"] = position.current_stop
+            milestone["protection_mode"] = "break_even"
+            milestone["be_promoted"] = True
             # When TP1 is executed we consider the dynamic trail to be active
             milestone["trail_active"] = True
             position.milestone_state = milestone
@@ -237,6 +252,8 @@ class CryptoExitWorker:
                     "partial_qty": partial_qty,
                     "partial_pnl": partial_pnl,
                     "remaining_qty": position.quantity,
+                    "protected_floor": position.current_stop,
+                    "protection_mode": "break_even",
                 },
             )
 

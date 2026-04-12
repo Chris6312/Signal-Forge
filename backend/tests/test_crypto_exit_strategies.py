@@ -100,6 +100,11 @@ class TestFixedRiskDynamicFloor:
         assert decision.should_exit is True
         assert "Stop hit" in decision.reason
 
+    def test_live_stop_breach_exits_immediately_without_candle_confirmation(self):
+        decision = self.strategy.evaluate(_pos(), 92.0, trending_up_ohlcv(20))
+        assert decision.should_exit is True
+        assert "Stop hit" in decision.reason
+
     def test_holding_between_stop_and_tp1(self):
         decision = self.strategy.evaluate(_pos(), 102.0, trending_up_ohlcv(20))
         assert decision.should_exit is False
@@ -109,14 +114,15 @@ class TestFixedRiskDynamicFloor:
         decision = self.strategy.evaluate(_pos(), 108.0, trending_up_ohlcv(20))
         assert decision.should_exit is False
         assert decision.new_stop == pytest.approx(100.0)  # max(stop=93, entry=100)
+        assert decision.tp1_hit is True
+        assert decision.trailing_active is True
 
     def test_trailing_floor_hit_after_tp1(self):
         pos = _pos(
             current_stop=100.0,
             milestone_state={"tp1_hit": True, "trailing_stop": 105.0},
         )
-        # Both candles close below the trailing stop
-        ohlcv = [make_candle(0, 103.0), make_candle(1, 104.0)]
+        ohlcv = trending_up_ohlcv(20)
         decision = self.strategy.evaluate(pos, 104.0, ohlcv)
         assert decision.should_exit is True
         assert "Trailing floor hit" in decision.reason
@@ -152,18 +158,25 @@ class TestPartialAtTP1DynamicTrail:
         assert decision.partial is True
         assert decision.partial_pct == pytest.approx(0.50)
         assert decision.new_stop == pytest.approx(100.0)  # promoted to entry
+        assert decision.tp1_hit is True
+        assert decision.trailing_active is True
 
     def test_holding_before_tp1(self):
         decision = self.strategy.evaluate(_pos(), 104.0, trending_up_ohlcv(20))
         assert decision.should_exit is False
         assert decision.partial is False
 
+    def test_live_stop_breach_before_tp1_exits_immediately(self):
+        decision = self.strategy.evaluate(_pos(), 92.0, trending_up_ohlcv(20))
+        assert decision.should_exit is True
+        assert "Stop hit" in decision.reason
+
     def test_trail_stop_hit_after_tp1(self):
         pos = _pos(
             current_stop=100.0,
             milestone_state={"tp1_hit": True, "trailing_stop": 105.0},
         )
-        ohlcv = [make_candle(0, 104.0), make_candle(1, 103.0)]
+        ohlcv = trending_up_ohlcv(20)
         decision = self.strategy.evaluate(pos, 103.0, ohlcv)
         assert decision.should_exit is True
         assert "Trail stop hit" in decision.reason

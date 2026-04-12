@@ -51,16 +51,27 @@ def _stop_confirmed(current_price: float, stop: float, ohlcv: list) -> bool:
     return True  # no prior candle data — trust ticker
 
 
+def _live_stop_hit(current_price: float, stop: float | None) -> bool:
+    return stop is not None and current_price <= float(stop)
+
+
+def _protective_floor(position) -> float | None:
+    stop = position.current_stop or position.initial_stop
+    if stop is None:
+        return None
+    return float(stop)
+
+
 def _tp1_atr_trail_decision(position, current_price: float, ohlcv: list, atr_multiplier: float = 1.5) -> Optional[ExitDecision]:
     entry = position.entry_price
-    stop = position.current_stop or position.initial_stop
+    stop = _protective_floor(position)
     milestone = position.milestone_state or {}
     atr = _atr(ohlcv)
     tp1 = position.profit_target_1
 
     if milestone.get("tp1_hit"):
         trail = float(milestone.get("trailing_stop", stop))
-        if _stop_confirmed(current_price, trail, ohlcv):
+        if _live_stop_hit(current_price, trail):
             return ExitDecision(True, f"Trail stop hit at {trail:.4f}")
         if atr:
             new_trail = max(trail, current_price - atr * atr_multiplier)
@@ -70,11 +81,10 @@ def _tp1_atr_trail_decision(position, current_price: float, ohlcv: list, atr_mul
 
     if tp1 and current_price >= tp1:
         floor = max(float(stop), float(entry)) if stop is not None and entry is not None else float(stop or entry or current_price)
-        new_stop = max(floor, current_price - atr * atr_multiplier) if atr else floor
         return ExitDecision(
             False,
             "TP1 reached — ATR trail activated",
-            new_stop=new_stop,
+            new_stop=floor,
             trailing_active=True,
             tp1_hit=True,
         )
@@ -86,14 +96,8 @@ class FixedRiskDynamicFloor:
     name = "Fixed Risk then Dynamic Protective Floor"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
-        entry = position.entry_price
-        stop = position.current_stop or position.initial_stop
-        milestone = position.milestone_state or {}
-        atr = _atr(ohlcv)
-        tp1 = position.profit_target_1
-        tp2 = position.profit_target_2
-
-        if _stop_confirmed(current_price, stop, ohlcv):
+        stop = _protective_floor(position)
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv, atr_multiplier=1.5)
@@ -110,13 +114,12 @@ class PartialAtTP1DynamicTrail:
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
         entry = position.entry_price
-        stop = position.current_stop or position.initial_stop
+        stop = _protective_floor(position)
         milestone = position.milestone_state or {}
         atr = _atr(ohlcv)
         tp1 = position.profit_target_1
-        tp2 = position.profit_target_2
 
-        if _stop_confirmed(current_price, stop, ohlcv):
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_hit = milestone.get("tp1_hit", False)
@@ -126,12 +129,14 @@ class PartialAtTP1DynamicTrail:
                 False, "TP1 reached — partial exit signal",
                 partial=True,
                 partial_pct=0.50,
-                new_stop=entry,
+                new_stop=max(float(stop), float(entry)) if stop is not None and entry is not None else float(stop or entry or current_price),
+                trailing_active=True,
+                tp1_hit=True,
             )
 
         if tp1_hit:
             trail = milestone.get("trailing_stop", stop)
-            if _stop_confirmed(current_price, float(trail), ohlcv):
+            if _live_stop_hit(current_price, float(trail)):
                 return ExitDecision(True, f"Trail stop hit at {trail:.4f}")
             if atr and _is_trending(ohlcv):
                 new_trail = max(float(trail), current_price - atr * 2.0)
@@ -149,8 +154,8 @@ class FailedFollowThroughExit:
     name = "Failed Follow-Through Exit"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
-        stop = position.current_stop or position.initial_stop
-        if _stop_confirmed(current_price, stop, ohlcv):
+        stop = _protective_floor(position)
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
@@ -172,8 +177,8 @@ class RangeFailureExit:
     name = "Range Failure Exit"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
-        stop = position.current_stop or position.initial_stop
-        if _stop_confirmed(current_price, stop, ohlcv):
+        stop = _protective_floor(position)
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
@@ -196,8 +201,8 @@ class TimeDegradationExit:
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
         from datetime import datetime, timezone
-        stop = position.current_stop or position.initial_stop
-        if _stop_confirmed(current_price, stop, ohlcv):
+        stop = _protective_floor(position)
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
@@ -218,8 +223,8 @@ class RegimeBreakdownExit:
     name = "Regime Breakdown Exit"
 
     def evaluate(self, position, current_price: float, ohlcv: list) -> ExitDecision:
-        stop = position.current_stop or position.initial_stop
-        if _stop_confirmed(current_price, stop, ohlcv):
+        stop = _protective_floor(position)
+        if _live_stop_hit(current_price, stop):
             return ExitDecision(True, f"Stop hit at {stop:.4f}")
 
         tp1_decision = _tp1_atr_trail_decision(position, current_price, ohlcv)
