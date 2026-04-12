@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import statistics
 
-from app.common.account_state import compute_drawdown_pct, drawdown_multiplier, should_block_new_entries
+from app.common.account_state import compute_drawdown_pct, should_block_new_entries
 from app.common.risk_config import normalize_asset_class, resolve_baseline_atr_percent, resolve_risk_per_trade_pct
 
 
@@ -32,6 +32,23 @@ def compute_volatility_multiplier(atr: float, price: float, baseline_atr_percent
 
     multiplier = 1.0 / vol_ratio
     return _clamp(multiplier, 0.5, 1.5)
+
+
+def compute_drawdown_risk_multiplier(drawdown_pct: float) -> float:
+    try:
+        drawdown_value = float(drawdown_pct)
+    except (TypeError, ValueError):
+        return 1.0
+
+    if drawdown_value < 0 or drawdown_value != drawdown_value:
+        return 1.0
+    if drawdown_value < 3:
+        return 1.0
+    if drawdown_value < 6:
+        return 0.8
+    if drawdown_value < 10:
+        return 0.6
+    return 0.4
 
 
 def _volatility_multiplier(volatility_pct: float) -> float:
@@ -162,7 +179,7 @@ def compute_position_size(
         logger.debug("position_sizer=%s", debug_payload)
         return 0.0
 
-    dd_multiplier = drawdown_multiplier(drawdown_pct)
+    dd_multiplier = compute_drawdown_risk_multiplier(drawdown_pct * 100.0)
     final_size = max(0.0, base_position_size * vol_multiplier * dd_multiplier)
 
     if max_notional_pct is not None:

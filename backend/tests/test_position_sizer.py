@@ -1,6 +1,6 @@
 import pytest
 
-from app.common.position_sizer import compute_position_size, compute_volatility_multiplier
+from app.common.position_sizer import compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
 from app.common.risk_config import resolve_baseline_atr_percent
 
 
@@ -67,6 +67,89 @@ def test_drawdown_reduces_size():
     )
 
     assert dd < base
+
+
+@pytest.mark.parametrize(
+    ("drawdown_pct", "expected"),
+    [
+        (0.0, 1.0),
+        (2.99, 1.0),
+        (3.0, 0.8),
+        (5.99, 0.8),
+        (6.0, 0.6),
+        (9.99, 0.6),
+        (10.0, 0.4),
+        (25.0, 0.4),
+    ],
+)
+def test_compute_drawdown_risk_multiplier_thresholds(drawdown_pct, expected):
+    assert compute_drawdown_risk_multiplier(drawdown_pct) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("invalid_drawdown", [None, -1.0, float("nan"), "bad"])
+def test_compute_drawdown_risk_multiplier_invalid_inputs_are_neutral(invalid_drawdown):
+    assert compute_drawdown_risk_multiplier(invalid_drawdown) == pytest.approx(1.0)
+
+
+def test_missing_drawdown_context_keeps_sizing_neutral():
+    with_drawdown_context = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+    without_drawdown_context = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+    )
+
+    assert without_drawdown_context == pytest.approx(with_drawdown_context)
+
+
+def test_deeper_drawdown_reduces_integrated_position_size():
+    neutral = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=10000.0,
+        peak_equity=10000.0,
+    )
+    mild = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=9700.0,
+        peak_equity=10000.0,
+    )
+    severe = compute_position_size(
+        asset_class="crypto",
+        equity=10000.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=9000.0,
+        peak_equity=10000.0,
+    )
+
+    assert neutral == pytest.approx(10.0)
+    assert mild == pytest.approx(8.0)
+    assert severe == pytest.approx(4.0)
+    assert severe < mild < neutral
 
 
 def test_combined_high_volatility_and_drawdown_produces_smallest_size():
