@@ -5,6 +5,7 @@ from app.crypto.strategies.entry_strategies import (
     _ema,
     _atr,
     _detect_regime,
+    _apply_pullback_reclaim_score_guardrails,
     _execution_readiness_metadata,
     MomentumBreakoutContinuation,
     PullbackReclaim,
@@ -200,6 +201,19 @@ class TestMeanReversionBounce:
         base.append(make_candle(58, 95.0))
         base.append(make_candle(59, 93.0))
         assert self.strategy.evaluate("BTC/USD", base) is None
+
+    def test_pullback_reclaim_not_elite_with_weak_confirmation(self):
+        result = _apply_pullback_reclaim_score_guardrails(
+            1.0,
+            {
+                "maturity": 0.0,
+                "momentum": 0.15,
+                "volume": 0.18,
+                "risk_reward": 0.48,
+            },
+        )
+
+        assert result < 0.90
 
 
 # ---------------------------------------------------------------------------

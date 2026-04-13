@@ -849,6 +849,24 @@ MIN_SCORE_THRESHOLD = 0.35
 STRONG_SIGNAL_THRESHOLD = 0.60
 
 
+def _apply_pullback_reclaim_score_guardrails(score: float, feature_scores: dict) -> float:
+    maturity_score = float(feature_scores.get("maturity", 0.0) or 0.0)
+    momentum_score = float(feature_scores.get("momentum", 0.0) or 0.0)
+    volume_score = float(feature_scores.get("volume", 0.0) or 0.0)
+    rr_score = float(feature_scores.get("risk_reward", 0.0) or 0.0)
+
+    if maturity_score < 0.20:
+        score = min(score, 0.82)
+    if momentum_score < 0.30:
+        score = min(score, 0.85)
+    if volume_score < 0.30:
+        score = min(score, 0.88)
+    if rr_score < 0.45:
+        score = min(score, 0.90)
+
+    return score
+
+
 def _strategy_name_to_key(name: str) -> str | None:
     return _normalize_stock_strategy_key(name)
 

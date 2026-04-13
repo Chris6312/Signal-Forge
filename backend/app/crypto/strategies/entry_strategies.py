@@ -759,6 +759,24 @@ MIN_SCORE_THRESHOLD = 0.20
 STRONG_SIGNAL_THRESHOLD = 0.60
 
 
+def _apply_pullback_reclaim_score_guardrails(score: float, feature_scores: dict) -> float:
+    maturity_score = float(feature_scores.get("maturity", 0.0) or 0.0)
+    momentum_score = float(feature_scores.get("momentum", 0.0) or 0.0)
+    volume_score = float(feature_scores.get("volume", 0.0) or 0.0)
+    rr_score = float(feature_scores.get("risk_reward", 0.0) or 0.0)
+
+    if maturity_score < 0.20:
+        score = min(score, 0.82)
+    if momentum_score < 0.30:
+        score = min(score, 0.85)
+    if volume_score < 0.30:
+        score = min(score, 0.88)
+    if rr_score < 0.45:
+        score = min(score, 0.90)
+
+    return score
+
+
 def _strategy_name_to_key(name: str) -> str | None:
     if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
         if "Failed Breakdown Reclaim" in name:
@@ -813,6 +831,8 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
             feature_scores = compute_features_for_signal(key, candidate, asset_class="crypto")
             base_score = score_strategy_from_candles(key, feature_scores, regime=getattr(candidate, "regime", None), asset_class="crypto")
             final_score = min(1.0, round(base_score, 6) + _strategy_specific_bonus(key, candidate))
+            if key == "pullback_reclaim":
+                final_score = _apply_pullback_reclaim_score_guardrails(final_score, feature_scores)
 
             logger.debug(
                 "CRYPTO_SCORE_DEBUG | %s | %s | feature_scores=%s | base_score_raw=%r | threshold_raw=%r | raw_signal_present=%s | passes=%s",
