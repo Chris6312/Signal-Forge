@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "stock"
 COOLDOWN_KEY_PREFIX = "cooldown:stock:"
+INTENT_KEY_PREFIX = "intent:stock:"
+INTENT_LOCK_TTL_SECONDS = 60
 
 
 def _strategy_key(value: str | None) -> str | None:
@@ -253,7 +255,27 @@ class StockMonitor:
             logger.debug("%s signal ready but market not in active trading window — holding off entry", ws.symbol)
             return
 
-        await self._create_position(db, ws, best)
+        intent_key = f"{INTENT_KEY_PREFIX}{ws.symbol}"
+        redis = None
+        locked = False
+        try:
+            redis = await get_redis()
+            locked = await redis.setnx(intent_key, "1")
+            if not locked:
+                logger.debug("Entry intent already in progress for %s — skipping", ws.symbol)
+                return
+            await redis.expire(intent_key, INTENT_LOCK_TTL_SECONDS)
+        except Exception as exc:
+            logger.warning("Redis lock failed for %s: %s", ws.symbol, exc)
+
+        try:
+            await self._create_position(db, ws, best)
+        finally:
+            try:
+                if redis and locked:
+                    await redis.delete(intent_key)
+            except Exception:
+                pass
 
     async def _create_position(self, db, ws: WatchlistSymbol, signal):
         from app.common.paper_ledger import size_paper_position, record_paper_fill
