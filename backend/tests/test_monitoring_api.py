@@ -1,11 +1,12 @@
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from app.api.routes import monitoring as monitoring_route
 from app.api.routes.monitoring import _select_top_signal, _strategy_key, get_monitoring_candidates
+from app.common.candle_store import CandleStore
 from app.crypto.monitoring import CryptoMonitor, _select_top_signal as crypto_select_top_signal, _execution_readiness_adjustment as crypto_execution_readiness_adjustment
 from app.stocks.monitoring import StockMonitor, _select_top_signal as stock_select_top_signal
 from app.stocks.strategies.entry_strategies import _execution_readiness_adjustment as stock_execution_readiness_adjustment
@@ -70,6 +71,95 @@ def test_stock_select_top_signal_falls_back_to_first_signal_when_backend_metadat
     selected = stock_select_top_signal({"signals": [first, second]})
 
     assert selected is first
+
+
+def _stock_candles(count: int, interval_minutes: int, start_price: float) -> list[dict]:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    candles = []
+    for index in range(count):
+        ts = now - timedelta(minutes=interval_minutes * (count - index))
+        candles.append({
+            "time": ts.isoformat().replace("+00:00", "Z"),
+            "open": start_price + index,
+            "high": start_price + index + 1,
+            "low": start_price + index - 1,
+            "close": start_price + index + 0.5,
+            "volume": 1000 + index,
+        })
+    return candles
+
+
+@pytest.mark.asyncio
+async def test_stock_monitoring_uses_candle_store_when_sufficient_bars_exist(monkeypatch):
+    store = CandleStore()
+    monkeypatch.setattr(monitoring_route, "_STOCK_CANDLE_STORE", store)
+    monkeypatch.setattr(monitoring_route, "_STOCK_FETCHER", monitoring_route.StockCandleFetcher(store))
+
+    ws = SimpleNamespace(
+        symbol="AAPL",
+        asset_class="stock",
+        state=SimpleNamespace(name="ACTIVE"),
+        added_at=datetime.now(timezone.utc) - timedelta(days=1),
+        watchlist_source_id=None,
+    )
+
+    await store.update(ws.symbol, 5, _stock_candles(24, 5, 100.0))
+    await store.update(ws.symbol, 15, _stock_candles(24, 15, 120.0))
+    await store.update(ws.symbol, 1440, _stock_candles(24, 1440, 140.0))
+
+    async def fake_evaluate_all(symbol, candles_by_tf, include_diagnostics=False, **kwargs):
+        assert len(candles_by_tf["5m"]) >= 20
+        assert len(candles_by_tf["15m"]) >= 20
+        assert len(candles_by_tf["daily"]) >= 20
+        signal = SimpleNamespace(
+            strategy="pullback_reclaim",
+            strategy_key="pullback_reclaim",
+            entry_price=150.0,
+            initial_stop=145.0,
+            profit_target_1=155.0,
+            profit_target_2=160.0,
+            regime="bull",
+            confidence=0.72,
+            notes="ready",
+        )
+        return {
+            "signals": [signal],
+            "top_strategy": "pullback_reclaim",
+            "top_confidence": 0.72,
+            "evaluated_strategy_scores": {"pullback_reclaim": 0.72},
+            "evaluated_strategies": {},
+            "rejected_strategies": {},
+            "feature_scores": {},
+            "timestamp_evaluated": 1.0,
+        }
+
+    monkeypatch.setattr("app.stocks.strategies.entry_strategies.evaluate_all", fake_evaluate_all)
+    monkeypatch.setattr(monitoring_route._STOCK_FETCHER, "backfill", AsyncMock(side_effect=AssertionError("backfill should not run when store already has enough candles")))
+    monkeypatch.setattr(monitoring_route._STOCK_FETCHER, "refresh_if_needed", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_timesales", AsyncMock(side_effect=AssertionError("broker timesales should not be called")))
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_history", AsyncMock(side_effect=AssertionError("broker history should not be called")))
+
+    watchlist_result = MagicMock()
+    watchlist_result.scalars.return_value.all.return_value = [ws]
+    position_result = MagicMock()
+    position_result.first.return_value = None
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 0
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[watchlist_result, position_result, count_result])
+
+    monkeypatch.setattr(monitoring_route, "get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitoring_route, "is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr(monitoring_route, "activation_ready_at", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitoring_route.regime_engine, "can_open", lambda *args, **kwargs: (True, None))
+
+    result = await get_monitoring_candidates(asset_class="stock", db=db)
+
+    assert result["total"] == 1
+    strategies = result["candidates"][0]["evaluation"]["strategies"]
+    assert strategies[0]["confidence"] > 0
+    assert result["candidates"][0]["top_confidence"] > 0
 
 
 @pytest.mark.asyncio
@@ -386,6 +476,135 @@ async def test_monitoring_route_reuses_cached_diagnostics_for_same_trigger_candl
     assert first["total"] == 1
     assert second["total"] == 1
     assert evaluate_all.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_monitoring_route_recovers_insufficient_candles_with_backfill(monkeypatch):
+    monitoring_route._EVAL_CACHE.clear()
+
+    ws = SimpleNamespace(
+        symbol="AAPL",
+        asset_class="stock",
+        state="active",
+        added_at=None,
+        watchlist_source_id=None,
+    )
+
+    def _db():
+        symbols_result = MagicMock()
+        symbols_result.scalars.return_value.all.return_value = [ws]
+        open_position_result = MagicMock()
+        open_position_result.first.return_value = None
+        open_position_result.scalar_one.return_value = 0
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[symbols_result, open_position_result, open_position_result])
+        return db
+
+    insufficient = {
+        "signals": [],
+        "top_strategy": None,
+        "top_confidence": 0.0,
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {
+            "pullback_reclaim": "insufficient_candles",
+            "trend_continuation": "insufficient_candles",
+        },
+        "feature_scores": {},
+    }
+    recovered_signal = SimpleNamespace(
+        strategy="Pullback Reclaim",
+        strategy_key="pullback_reclaim",
+        confidence=0.63,
+        entry_price=100.0,
+        initial_stop=95.0,
+        profit_target_1=105.0,
+        profit_target_2=110.0,
+        regime="neutral",
+        notes="recovered",
+    )
+    recovered = {
+        "signals": [recovered_signal],
+        "top_strategy": "pullback_reclaim",
+        "top_confidence": 0.63,
+        "evaluated_strategy_scores": {"pullback_reclaim": 0.63},
+        "evaluated_strategies": {"pullback_reclaim": {"valid": True, "base_score": 0.63, "bias": 0.0, "final_score": 0.63, "reason": None, "feature_scores": {}}},
+        "rejected_strategies": {},
+        "feature_scores": {},
+    }
+
+    evaluate_all = MagicMock(side_effect=[insufficient, recovered])
+    monkeypatch.setattr("app.stocks.strategies.entry_strategies.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_timesales", AsyncMock(return_value=[
+        {"time": datetime(2026, 4, 11, 9, 30, tzinfo=timezone.utc).isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100},
+        {"time": datetime(2026, 4, 11, 9, 35, tzinfo=timezone.utc).isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 100},
+    ]))
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_history", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.stocks.candle_fetcher.StockCandleFetcher.backfill", AsyncMock())
+    monkeypatch.setattr("app.api.routes.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.api.routes.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr("app.api.routes.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+
+    result = await get_monitoring_candidates(asset_class="stock", db=_db())
+
+    assert result["total"] == 1
+    assert result["candidates"][0]["top_strategy"] == "pullback_reclaim"
+    assert result["candidates"][0]["top_confidence"] == 0.63
+    assert result["candidates"][0]["evaluation"]["top_strategy"] == "pullback_reclaim"
+    assert result["candidates"][0]["evaluation"]["confidence"] == 0.63
+    assert evaluate_all.call_count == 2
+    assert monitoring_route.StockCandleFetcher.backfill.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_monitoring_route_keeps_symbol_visible_when_recovery_still_fails(monkeypatch):
+    monitoring_route._EVAL_CACHE.clear()
+
+    ws = SimpleNamespace(
+        symbol="AAPL",
+        asset_class="stock",
+        state="active",
+        added_at=None,
+        watchlist_source_id=None,
+    )
+
+    def _db():
+        symbols_result = MagicMock()
+        symbols_result.scalars.return_value.all.return_value = [ws]
+        open_position_result = MagicMock()
+        open_position_result.first.return_value = None
+        open_position_result.scalar_one.return_value = 0
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[symbols_result, open_position_result])
+        return db
+
+    insufficient = {
+        "signals": [],
+        "top_strategy": None,
+        "top_confidence": 0.0,
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {
+            "pullback_reclaim": "insufficient_candles",
+        },
+        "feature_scores": {},
+    }
+
+    evaluate_all = MagicMock(side_effect=[insufficient, insufficient])
+    monkeypatch.setattr("app.stocks.strategies.entry_strategies.evaluate_all", evaluate_all)
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_timesales", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.stocks.tradier_client.tradier_client.get_history", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.stocks.candle_fetcher.StockCandleFetcher.backfill", AsyncMock(side_effect=RuntimeError("backfill failed")))
+    monkeypatch.setattr("app.api.routes.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.api.routes.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr("app.api.routes.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+
+    result = await get_monitoring_candidates(asset_class="stock", db=_db())
+
+    assert result["total"] == 1
+    assert result["candidates"][0]["symbol"] == "AAPL"
+    assert result["candidates"][0]["top_strategy"] is None
+    assert result["candidates"][0]["evaluation"]["top_strategy"] is None
 
 
 @pytest.mark.asyncio

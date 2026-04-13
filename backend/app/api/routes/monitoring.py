@@ -11,14 +11,20 @@ from app.api.deps import get_db_session
 from app.api.schemas.monitoring import EvaluateSymbolOut, MonitoringListOut
 from app.common.models.position import Position, PositionState
 from app.common.models.watchlist import SymbolState, WatchlistSymbol
+from app.common.candle_store import CandleStore, TF_MINUTES
 from app.common.redis_client import get_redis
 from app.common.symbols import canonical_symbol
 from app.common.watchlist_activation import activation_ready_at, is_watchlist_activation_ready
 from app.regime import regime_engine
+from app.stocks.candle_fetcher import StockCandleFetcher
+from app.stocks.monitoring import _needs_insufficient_candle_recovery, _stock_candles_by_tf
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-_EVAL_CACHE: dict[tuple[str, str, float], dict] = {}
+_EVAL_CACHE: dict[tuple[str, ...], dict] = {}
+_STOCK_CANDLE_STORE = CandleStore()
+_STOCK_FETCHER = StockCandleFetcher(_STOCK_CANDLE_STORE)
+_STOCK_EVAL_MIN_CANDLES = 20
 
 
 def _strategy_key(value: str | None) -> str | None:
@@ -56,6 +62,23 @@ def _latest_closed_ts(candles, interval_minutes: int) -> float:
             return 0.0
 
     return 0.0
+
+
+async def _stock_eval_candles(symbol: str) -> dict[str, list]:
+    if any(_STOCK_CANDLE_STORE.frame_info(symbol, TF_MINUTES[tf]).get("count", 0) < _STOCK_EVAL_MIN_CANDLES for tf in ("5m", "15m", "daily")):
+        await _STOCK_FETCHER.backfill(symbol)
+    await _STOCK_FETCHER.refresh_if_needed(symbol)
+    return _stock_candles_by_tf(_STOCK_CANDLE_STORE, symbol)
+
+
+def _stock_eval_cache_key(symbol: str) -> tuple[str, str, float, float, float]:
+    return (
+        "stock",
+        symbol,
+        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["5m"]),
+        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["15m"]),
+        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["daily"]),
+    )
 
 
 def _select_top_signal(signals, top_strategy: str | None):
@@ -165,26 +188,23 @@ async def get_monitoring_candidates(
                 )
             elif ws.asset_class == "stock":
                 from app.stocks.strategies.entry_strategies import evaluate_all
-                from app.stocks.tradier_client import tradier_client
 
-                tf5m, tf15m, daily = await asyncio.gather(
-                    tradier_client.get_timesales(ws.symbol, interval="5min"),
-                    tradier_client.get_timesales(ws.symbol, interval="15min"),
-                    tradier_client.get_history(ws.symbol),
-                )
-                trigger_ts = _latest_closed_ts(tf5m, 5)
-                cache_key = (ws.asset_class, ws.symbol, trigger_ts)
-                if trigger_ts and cache_key in _EVAL_CACHE:
+                candles_by_tf = await _stock_eval_candles(ws.symbol)
+                cache_key = _stock_eval_cache_key(ws.symbol)
+                if all(ts > 0 for ts in cache_key[2:]) and cache_key in _EVAL_CACHE:
                     return _EVAL_CACHE[cache_key]
                 raw_result = evaluate_all(
                     ws.symbol,
-                    {
-                        "5m": tf5m,
-                        "15m": tf15m,
-                        "daily": daily,
-                    },
+                    candles_by_tf,
                     include_diagnostics=True,
                 )
+                if _needs_insufficient_candle_recovery(raw_result):
+                    logger.info("Insufficient candles for %s — targeted backfill and one re-evaluation", ws.symbol)
+                    try:
+                        await _STOCK_FETCHER.backfill(ws.symbol)
+                        raw_result = evaluate_all(ws.symbol, _stock_candles_by_tf(_STOCK_CANDLE_STORE, ws.symbol), include_diagnostics=True)
+                    except Exception as exc:
+                        logger.warning("Targeted backfill recovery failed for %s: %s", ws.symbol, exc)
             else:
                 raw_result = []
 
@@ -192,7 +212,7 @@ async def get_monitoring_candidates(
             signals = normalized["signals"]
             top_signal = _select_top_signal(signals, normalized["top_strategy"])
             evaluation = {
-                "strategies": signals,
+                "strategies": [_serialize_signal(signal) for signal in signals],
                 "top_strategy": normalized["top_strategy"],
                 "confidence": normalized["top_confidence"] if normalized["top_confidence"] is not None else (top_signal.confidence if top_signal else 0),
             }
@@ -201,7 +221,7 @@ async def get_monitoring_candidates(
                 "diagnostics": normalized,
                 "evaluation": evaluation,
             }
-            if cache_key and cache_key[2]:
+            if cache_key and all(ts > 0 for ts in cache_key[2:]):
                 _EVAL_CACHE[cache_key] = payload
             return payload
         except Exception as exc:
@@ -294,7 +314,7 @@ async def get_monitoring_candidates(
             "top_confidence": backend_top_confidence if backend_top_confidence is not None else (sig_obj.confidence if sig_obj else None),
             "top_entry": sig_obj.entry_price if sig_obj else None,
             "evaluation": evaluation if isinstance(evaluation, dict) else ({
-                "strategies": (diagnostics.get("signals") or []) if isinstance(diagnostics, dict) else [],
+                "strategies": [_serialize_signal(signal) for signal in (diagnostics.get("signals") or [])] if isinstance(diagnostics, dict) else [],
                 "top_strategy": backend_top_strategy,
                 "confidence": backend_top_confidence if backend_top_confidence is not None else (sig_obj.confidence if sig_obj else 0),
             } if diagnostics is not None or sig_obj is not None else None),
@@ -349,23 +369,10 @@ async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
             )
         elif asset_class == "stock":
             from app.stocks.strategies.entry_strategies import evaluate_all
-            from app.stocks.tradier_client import tradier_client
 
             upper_symbol = symbol.upper()
-            tf5m, tf15m, daily = await asyncio.gather(
-                tradier_client.get_timesales(upper_symbol, interval="5min"),
-                tradier_client.get_timesales(upper_symbol, interval="15min"),
-                tradier_client.get_history(upper_symbol),
-            )
-            raw_result = evaluate_all(
-                upper_symbol,
-                {
-                    "5m": tf5m,
-                    "15m": tf15m,
-                    "daily": daily,
-                },
-                include_diagnostics=True,
-            )
+            candles_by_tf = await _stock_eval_candles(upper_symbol)
+            raw_result = evaluate_all(upper_symbol, candles_by_tf, include_diagnostics=True)
         else:
             raw_result = []
 
@@ -373,6 +380,11 @@ async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
         result["signals"] = [_serialize_signal(signal) for signal in normalized["signals"]]
         result["top_strategy"] = normalized["top_strategy"]
         result["top_confidence"] = normalized["top_confidence"]
+        result["evaluation"] = {
+            "strategies": result["signals"],
+            "top_strategy": normalized["top_strategy"],
+            "confidence": normalized["top_confidence"] if normalized["top_confidence"] is not None else 0,
+        }
         result["evaluated_strategy_scores"] = normalized["evaluated_strategy_scores"]
         result["evaluated_strategies"] = normalized["evaluated_strategies"]
         result["rejected_strategies"] = normalized["rejected_strategies"]
