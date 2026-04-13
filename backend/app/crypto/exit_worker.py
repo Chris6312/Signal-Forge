@@ -104,11 +104,13 @@ class CryptoExitWorker:
             position.updated_at = now
             return
 
-        try:
-            hard_flag = bool((position.frozen_policy or {}).get("hard_max_hold", False))
-        except Exception:
-            hard_flag = False
         hold_metrics = compute_position_hold_metrics(position.entry_time, position.max_hold_hours, now=now)
+        try:
+            frozen_policy = position.frozen_policy or {}
+            hard_value = frozen_policy.get("hard_max_hold")
+            hard_flag = bool(hold_metrics.max_hold_hours) if hard_value is None else bool(hard_value)
+        except Exception:
+            hard_flag = bool(hold_metrics.max_hold_hours)
         if hard_flag and hold_metrics.max_hold_hours and hold_metrics.hours_held >= hold_metrics.max_hold_hours:
             await self._close_position(
                 db, position, current_price,

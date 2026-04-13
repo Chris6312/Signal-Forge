@@ -166,3 +166,110 @@ def test_process_update_promotes_managed_symbol_and_clears_closed_at(monkeypatch
     assert watchlist_symbol.tags == ['new']
     assert watchlist_symbol.notes == 'fresh'
 
+
+
+def test_process_update_append_mode_keeps_existing_active_symbols(monkeypatch):
+    existing_active = SimpleNamespace(
+        symbol="BTC/USD",
+        asset_class="crypto",
+        state=SymbolState.ACTIVE,
+        watchlist_source_id="old-source",
+        notes=None,
+        reason="existing",
+        confidence=0.75,
+        tags=["legacy"],
+        added_at=datetime(2026, 1, 1, 10, 0, 0),
+        removed_at=None,
+        managed_since=None,
+        closed_at=None,
+    )
+
+    existing_result = MagicMock()
+    existing_result.scalars.return_value.all.return_value = [existing_active]
+
+    fake_db = AsyncMock()
+    fake_db.execute = AsyncMock(return_value=existing_result)
+    added_objects = []
+    fake_db.add = lambda obj: added_objects.append(obj)
+    fake_db.commit = AsyncMock()
+
+    class _Ctx:
+        def __init__(self, db):
+            self._db = db
+
+        async def __aenter__(self):
+            return self._db
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr('app.common.watchlist_engine.AsyncSessionLocal', lambda: _Ctx(fake_db))
+
+    import asyncio
+
+    result = asyncio.run(
+        watchlist_engine.process_update(
+            [{"symbol": "ETH/USD", "asset_class": "crypto", "reason": "new"}],
+            source_id='unittest',
+            payload_meta=None,
+            append=True,
+        )
+    )
+
+    assert result['removed'] == []
+    assert result['append'] is True
+    assert any(getattr(obj, 'symbol', None) == 'ETH/USD' and getattr(obj, 'asset_class', None) == 'crypto' for obj in added_objects)
+    assert existing_active.state is SymbolState.ACTIVE
+
+
+def test_process_update_replace_mode_still_removes_missing_symbols(monkeypatch):
+    watchlist_symbol = SimpleNamespace(
+        symbol="BTC/USD",
+        asset_class="crypto",
+        state=SymbolState.ACTIVE,
+        watchlist_source_id="old-source",
+        notes=None,
+        reason="existing",
+        confidence=0.75,
+        tags=["legacy"],
+        added_at=datetime(2026, 1, 1, 10, 0, 0),
+        removed_at=None,
+        managed_since=None,
+        closed_at=None,
+    )
+
+    existing_result = MagicMock()
+    existing_result.scalars.return_value.all.return_value = [watchlist_symbol]
+    open_result = MagicMock()
+    open_result.__iter__.return_value = iter([])
+
+    fake_db = AsyncMock()
+    fake_db.execute = AsyncMock(side_effect=[existing_result, open_result])
+    fake_db.add = lambda obj: None
+    fake_db.commit = AsyncMock()
+
+    class _Ctx:
+        def __init__(self, db):
+            self._db = db
+
+        async def __aenter__(self):
+            return self._db
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr('app.common.watchlist_engine.AsyncSessionLocal', lambda: _Ctx(fake_db))
+
+    import asyncio
+
+    result = asyncio.run(
+        watchlist_engine.process_update(
+            [{"symbol": "ETH/USD", "asset_class": "crypto", "reason": "new"}],
+            source_id='unittest',
+            payload_meta=None,
+            append=False,
+        )
+    )
+
+    assert result['removed'] == ['BTC/USD -> INACTIVE']
+    assert watchlist_symbol.state is SymbolState.INACTIVE

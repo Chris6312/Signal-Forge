@@ -71,6 +71,33 @@ async def test_stock_exit_worker_hard_max_hold_uses_shared_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stock_exit_worker_defaults_to_hard_max_hold_when_flag_missing(monkeypatch):
+    worker = StockExitWorker()
+    db = _make_db()
+    position = _make_position(frozen_policy={}, max_hold_hours=24)
+
+    close_position = AsyncMock()
+    monkeypatch.setattr(worker, "_close_position", close_position)
+    monkeypatch.setattr(
+        "app.stocks.exit_worker.compute_position_hold_metrics",
+        lambda *args, **kwargs: SimpleNamespace(
+            hours_held=24.1,
+            max_hold_hours=24,
+            hold_ratio=1.0041666667,
+            time_risk_state="red",
+        ),
+    )
+    monkeypatch.setattr("app.stocks.exit_worker.tradier_client.get_quote", AsyncMock(return_value={"AAPL": {"last": 105.0}}))
+    monkeypatch.setattr("app.stocks.exit_worker.tradier_client.get_history", AsyncMock(side_effect=AssertionError("history should not be fetched after fallback hard max hold exit")))
+
+    await worker._evaluate_position(db, position)
+
+    assert close_position.await_count == 1
+    assert "Hard max hold time exceeded (24h)" in close_position.await_args.args[3]
+    assert position.updated_at is not None
+
+
+@pytest.mark.asyncio
 async def test_stock_exit_worker_tp1_partial_promotes_break_even_and_persists(monkeypatch):
     worker = StockExitWorker()
     db = _make_db(MagicMock())

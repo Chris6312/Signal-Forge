@@ -6,7 +6,7 @@ export const fetchHealth = () => api.get('/health', { baseURL: import.meta.env.V
 export const fetchWatchlist = (params?: Record<string, string>) =>
   api.get('/watchlist', { params }).then(r => r.data)
 export const fetchActiveWatchlist = () => api.get('/watchlist/active').then(r => r.data)
-export const postWatchlistUpdate = (body: { watchlist: object[]; source_id?: string }) =>
+export const postWatchlistUpdate = (body: { watchlist: object[]; source_id?: string; append?: boolean }) =>
   api.post('/watchlist/update', body).then(r => r.data)
 
 export const fetchMonitoringCandidates = (params?: Record<string, string>) =>

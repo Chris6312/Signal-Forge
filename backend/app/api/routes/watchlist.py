@@ -51,7 +51,7 @@ async def update_watchlist(body: WatchlistUpdateIn):
         else:
             incoming.append(item)
 
-    result = await watchlist_engine.process_update(incoming, source_id=body.source_id)
+    result = await watchlist_engine.process_update(incoming, source_id=body.source_id, append=body.append)
     return WatchlistUpdateOut(**result)
 
 

@@ -33,6 +33,7 @@ class WatchlistEngine:
         new_symbols: List[dict],
         source_id: str = "",
         payload_meta: dict | None = None,
+        append: bool = False,
     ) -> dict:
         # AsyncSessionLocal may be an async context manager factory or an
         # async generator (FastAPI dependency override yields). Support both
@@ -42,7 +43,7 @@ class WatchlistEngine:
         # If it implements the async context manager protocol, use it
         if hasattr(session_ctx, "__aenter__"):
             async with session_ctx as db:
-                result = await self._process(db, new_symbols, source_id, payload_meta)
+                result = await self._process(db, new_symbols, source_id, payload_meta, append=append)
                 await db.commit()
                 return result
         # Otherwise assume it's an async generator that yields a session
@@ -50,7 +51,7 @@ class WatchlistEngine:
             db = None
             try:
                 db = await session_ctx.__anext__()
-                result = await self._process(db, new_symbols, source_id, payload_meta)
+                result = await self._process(db, new_symbols, source_id, payload_meta, append=append)
                 try:
                     await db.commit()
                 except Exception:
@@ -64,7 +65,7 @@ class WatchlistEngine:
         # Fallback: call and await if it's a coroutine returning a session
         try:
             db = await session_ctx
-            result = await self._process(db, new_symbols, source_id, payload_meta)
+            result = await self._process(db, new_symbols, source_id, payload_meta, append=append)
             await db.commit()
             return result
         except Exception:
@@ -76,6 +77,7 @@ class WatchlistEngine:
         new_symbols: List[dict],
         source_id: str,
         payload_meta: dict | None = None,
+        append: bool = False,
     ) -> dict:
         # Normalize incoming items into tuples: (symbol, asset_class, metadata)
         incoming_items = []
@@ -166,7 +168,11 @@ class WatchlistEngine:
                 db.add(ws)
                 added.append(symbol)
 
-        to_remove = {key: ws for key, ws in existing_active.items() if key not in {(s, ac) for s, ac, _ in incoming_items}}
+        incoming_keys = {(s, ac) for s, ac, _ in incoming_items}
+        if append:
+            to_remove = {}
+        else:
+            to_remove = {key: ws for key, ws in existing_active.items() if key not in incoming_keys}
 
         if to_remove:
             from app.common.models.position import Position, PositionState
@@ -224,12 +230,13 @@ class WatchlistEngine:
                 "timestamp_received": payload_meta.get("timestamp") if payload_meta else None,
                 "ai_hints_seen": ai_hints_seen,
                 "validation_reasons": validation_reasons,
+                "append": append,
             },
         )
 
         logger.info(
-            "Watchlist update: +%d added, %d removed, %d retained, %d promoted",
-            len(added), len(removed), len(retained), len(promoted),
+            "Watchlist update: +%d added, %d removed, %d retained, %d promoted (append=%s)",
+            len(added), len(removed), len(retained), len(promoted), append,
         )
 
         return {
@@ -238,6 +245,7 @@ class WatchlistEngine:
             "retained": retained,
             "promoted": promoted,
             "total": len(incoming_items),
+            "append": append,
         }
 
     async def release_managed_symbol(

@@ -66,6 +66,7 @@ export default function Watchlist() {
   const [jsonInput, setJsonInput] = useState(EXAMPLE_PAYLOAD)
   const [jsonOpen, setJsonOpen] = useState(false)
   const [updateResult, setUpdateResult] = useState<string | null>(null)
+  const [appendMode, setAppendMode] = useState(false)
   const [selectedRow, setSelectedRow] = useState<WatchlistSymbol | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -81,7 +82,7 @@ export default function Watchlist() {
   const data = dataRaw as WatchlistSymbol[]
 
   const mutation = useMutation({
-    mutationFn: (body: { watchlist: object[]; source_id: string }) => postWatchlistUpdate(body),
+    mutationFn: (body: { watchlist: object[]; source_id: string; append?: boolean }) => postWatchlistUpdate(body),
     onSuccess: (result: any) => {
       setUpdateResult(`[SYS_SUCCESS] Payload accepted. \n${JSON.stringify(result, null, 2)}`)
       qc.invalidateQueries({ queryKey: ['watchlist'] })
@@ -122,6 +123,7 @@ export default function Watchlist() {
       const body = {
         watchlist: normalized,
         source_id: parsed.source_id ?? parsed.source ?? 'manual',
+        append: Boolean(parsed.append ?? appendMode),
       }
 
       mutation.mutate(body)
@@ -329,6 +331,33 @@ export default function Watchlist() {
               onChange={e => setJsonInput(e.target.value)}
               spellCheck="false"
             />
+            <div className="flex flex-wrap items-center gap-3 rounded border border-surface-border bg-[#12141f] px-3 py-2 text-[10px] mono uppercase tracking-widest text-gray-400">
+              <span className="text-gray-500">Upload Mode</span>
+              <button
+                type="button"
+                onClick={() => setAppendMode(false)}
+                className={clsx(
+                  'rounded px-2 py-1 border transition-colors',
+                  !appendMode ? 'border-brand/40 bg-brand/15 text-brand' : 'border-surface-border text-gray-500 hover:text-gray-300'
+                )}
+              >
+                Replace class
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppendMode(true)}
+                className={clsx(
+                  'rounded px-2 py-1 border transition-colors',
+                  appendMode ? 'border-brand/40 bg-brand/15 text-brand' : 'border-surface-border text-gray-500 hover:text-gray-300'
+                )}
+              >
+                Append class
+              </button>
+              <span className="text-gray-500 normal-case tracking-normal">
+                Append keeps current stock/crypto symbols and adds the new ones for the asset classes in this payload.
+              </span>
+            </div>
+
             <div className="flex items-center gap-3">
               <input
                 ref={fileInputRef}

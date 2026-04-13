@@ -50,6 +50,7 @@ class WatchlistItemIn(BaseModel):
 class WatchlistUpdateIn(BaseModel):
     watchlist: List[WatchlistItemIn]
     source_id: str = "manual"
+    append: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -69,3 +70,4 @@ class WatchlistUpdateOut(BaseModel):
     retained: list[str]
     promoted: list[str]
     total: int
+    append: bool = False
