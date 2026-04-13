@@ -191,9 +191,15 @@ async def get_monitoring_candidates(
             normalized = _normalize_eval_result(raw_result)
             signals = normalized["signals"]
             top_signal = _select_top_signal(signals, normalized["top_strategy"])
+            evaluation = {
+                "strategies": signals,
+                "top_strategy": normalized["top_strategy"],
+                "confidence": normalized["top_confidence"] if normalized["top_confidence"] is not None else (top_signal.confidence if top_signal else 0),
+            }
             payload = {
                 "top_signal": top_signal,
                 "diagnostics": normalized,
+                "evaluation": evaluation,
             }
             if cache_key and cache_key[2]:
                 _EVAL_CACHE[cache_key] = payload
@@ -213,6 +219,7 @@ async def get_monitoring_candidates(
         cooldown_active = False
         regime_allowed = None
         evaluation_error = None
+        evaluation = None
         top_notes = None
         position_or_order_status = None
         backend_top_strategy = None
@@ -221,9 +228,11 @@ async def get_monitoring_candidates(
         if isinstance(sig, Exception):
             evaluation_error = str(sig)
             sig_obj = None
+            diagnostics = None
         else:
             sig_obj = sig.get("top_signal") if isinstance(sig, dict) else None
             diagnostics = sig.get("diagnostics") if isinstance(sig, dict) else None
+            evaluation = sig.get("evaluation") if isinstance(sig, dict) else None
             backend_top_strategy = diagnostics.get("top_strategy") if isinstance(diagnostics, dict) else None
             backend_top_confidence = diagnostics.get("top_confidence") if isinstance(diagnostics, dict) else None
             if diagnostics and isinstance(diagnostics, dict):
@@ -284,6 +293,11 @@ async def get_monitoring_candidates(
             "top_strategy": backend_top_strategy or (sig_obj.strategy if sig_obj else None),
             "top_confidence": backend_top_confidence if backend_top_confidence is not None else (sig_obj.confidence if sig_obj else None),
             "top_entry": sig_obj.entry_price if sig_obj else None,
+            "evaluation": evaluation if isinstance(evaluation, dict) else ({
+                "strategies": (diagnostics.get("signals") or []) if isinstance(diagnostics, dict) else [],
+                "top_strategy": backend_top_strategy,
+                "confidence": backend_top_confidence if backend_top_confidence is not None else (sig_obj.confidence if sig_obj else 0),
+            } if diagnostics is not None or sig_obj is not None else None),
             "blocked_reason": blocked_reason,
             "has_open_position": has_open_position,
             "cooldown_active": bool(cooldown_active),

@@ -128,8 +128,8 @@ class StockMonitor:
             for ws in symbols:
                 await self._fetcher.refresh_if_needed(ws.symbol)
 
-            # Only evaluate entry signals during the active trading session
-            if status != "open":
+            # Evaluate during premarket and regular session; execution is still gated later.
+            if status not in ("pre_market", "open"):
                 return
 
             for ws in symbols:
@@ -287,6 +287,7 @@ class StockMonitor:
 
     async def _create_position(self, db, ws: WatchlistSymbol, signal):
         from app.common.paper_ledger import size_paper_position, record_paper_fill
+        from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 
         trading_mode = await runtime_state.get_trading_mode()
         risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
@@ -297,6 +298,14 @@ class StockMonitor:
             quantity = await size_paper_position(
                 db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
             )
+
+        if quantity <= 0:
+            logger.info(
+                "Skipping stock position creation for %s because position sizer returned zero",
+                signal.symbol,
+                extra={"reason": POSITION_SIZER_RETURNED_ZERO},
+            )
+            return None
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         exit_strategy = self._select_exit_strategy(signal)
@@ -384,13 +393,16 @@ class StockMonitor:
             },
         )
 
-        ws_manager.broadcast_from_thread("position_executed", {
-            "symbol":      ws.symbol,
-            "side":        "BUY",
-            "quantity":    float(quantity),
-            "price":       signal.entry_price,
-            "asset_class": ASSET_CLASS,
-        })
+        ws_manager.broadcast_from_thread(
+            "position_executed",
+            {
+                "symbol": ws.symbol,
+                "side": "BUY",
+                "quantity": float(quantity),
+                "price": signal.entry_price,
+                "asset_class": ASSET_CLASS,
+            },
+        )
 
     def _select_exit_strategy(self, signal) -> str:
         strategy_key = _signal_key(signal)

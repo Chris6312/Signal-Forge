@@ -10,6 +10,7 @@ class MonitoringCandidateOut(BaseModel):
     top_strategy: str | None = None
     top_confidence: float | None = None
     top_entry: float | None = None
+    evaluation: dict[str, object] | None = None
 
     # Diagnostic fields added in Phase 2A
     blocked_reason: str | None = None
@@ -43,6 +44,7 @@ class EvaluateSymbolOut(BaseModel):
     signals: list[EntrySignalOut]
     top_strategy: str | None = None
     top_confidence: float | None = None
+    evaluation: dict[str, object] | None = None
     evaluated_strategy_scores: dict[str, float] = {}
     evaluated_strategies: dict[str, dict] = {}
     rejected_strategies: dict[str, str] = {}

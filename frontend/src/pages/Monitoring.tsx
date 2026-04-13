@@ -32,6 +32,11 @@ interface Candidate {
   top_strategy: string | null
   top_confidence: number | null
   top_entry: number | null
+  evaluation?: {
+    strategies?: Signal[]
+    top_strategy?: string | null
+    confidence?: number | null
+  } | null
   blocked_reason?: string | null
   has_open_position?: boolean
   cooldown_active?: boolean
@@ -39,6 +44,12 @@ interface Candidate {
   evaluation_error?: string | null
   top_notes?: string | null
   position_or_order_status?: string | null
+  strategyKey?: string | null
+  strategyLabel?: string | null
+  confidence?: number | null
+  resolvedLifecycleState?: string | null
+  resolvedDecisionState?: string | null
+  resolvedDecisionReason?: string | null
 }
 
 interface FeatureScores {
@@ -319,6 +330,9 @@ export default function Monitoring() {
         if (row.cooldown_active) parts.push('COOLDOWN')
         if (row.regime_allowed === false) parts.push('REGIME_BLOCK')
         if (row.blocked_reason) parts.push('BLOCKED')
+        if (row.resolvedLifecycleState) parts.push(row.resolvedLifecycleState)
+        if (row.resolvedDecisionState) parts.push(row.resolvedDecisionState)
+        if (row.resolvedDecisionReason) parts.push(row.resolvedDecisionReason)
 
         return (
           <div className="text-[10px] mono text-gray-400">
@@ -338,8 +352,8 @@ export default function Monitoring() {
     columnHelper.accessor('top_strategy', {
       header: 'PRIMARY_ALGO',
       cell: (info: any) => {
-        const val = info.getValue()
-        if (!val) return <span className="text-gray-600 mono text-xs">—</span>
+        const row = info.row.original as Candidate
+        const val = info.getValue() ?? row.evaluation?.top_strategy ?? 'Evaluating'
         return (
           <span className="text-xs font-mono font-medium text-gray-300 uppercase tracking-wider bg-surface-card border border-surface-border px-2 py-0.5 rounded">
             {val}
@@ -350,8 +364,8 @@ export default function Monitoring() {
     columnHelper.accessor('top_confidence', {
       header: 'CONFIDENCE',
       cell: (info: any) => {
-        const val = info.getValue()
-        if (val == null) return <span className="text-gray-600 mono text-xs">—</span>
+        const row = info.row.original as Candidate
+        const val = info.getValue() ?? row.evaluation?.confidence ?? 0
         return (
           <span
             className={clsx(

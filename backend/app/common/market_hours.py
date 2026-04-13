@@ -6,7 +6,7 @@ EDT (UTC-4) and EST (UTC-5) transparently via the IANA tz database.
 
 Session windows
 ---------------
-  pre_market   09:15 – 09:30 ET  Pull candles / backfill / prep signals, no new entries
+  pre_market   08:40 – 09:30 ET  Pull candles / backfill / prep signals, no new entries
   open         09:30 – 15:50 ET  Active trading; entries and exits both live
   eod          15:50 – 16:00 ET  EOD exits only; no new entries allowed
   closed       everything else   All stock operations suspended
@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 _EASTERN = ZoneInfo("America/New_York")
 
-_PREP_START   = dt_time(9, 15)   # begin candle pull / backfill / signal prep
+_PREP_START   = dt_time(8, 40)   # begin candle pull / backfill / signal prep
 _MARKET_OPEN  = dt_time(9, 30)   # NYSE regular session open
 _EOD_CUTOFF   = dt_time(15, 50)  # stop new entries, begin EOD exits
 _MARKET_CLOSE = dt_time(16, 0)   # NYSE regular session close
@@ -129,7 +129,7 @@ def is_market_open() -> bool:
 
 
 def is_pre_market_prep() -> bool:
-    """True during 09:15–09:30 ET — candle pull / signal prep, no entries."""
+    """True during 08:40–09:30 ET — candle pull / signal prep, no entries."""
     return market_status() == "pre_market"
 
 
@@ -151,7 +151,7 @@ def can_enter_trade() -> bool:
 
 def can_pull_data() -> bool:
     """
-    True whenever the bot should be active at all (09:15–16:00 ET on trading days).
+    True whenever the bot should be active at all (08:40–16:00 ET on trading days).
     Gate any stock worker cycle with this to prevent wasteful after-hours API calls.
     """
     return market_status() in ("pre_market", "open", "eod")

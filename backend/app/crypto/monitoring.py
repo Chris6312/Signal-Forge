@@ -423,113 +423,118 @@ class CryptoMonitor:
             pass
 
     async def _create_position(self, db, ws: WatchlistSymbol, signal, canonical: str):
-    from app.common.paper_ledger import size_paper_position, record_paper_fill
-    from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
+        from app.common.paper_ledger import size_paper_position, record_paper_fill
+        from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 
-    trading_mode = await runtime_state.get_trading_mode()
-    risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
-    is_paper = trading_mode == "paper"
+        trading_mode = await runtime_state.get_trading_mode()
+        risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
+        is_paper = trading_mode == "paper"
 
-    quantity = 0.0
-    if is_paper:
-        quantity = await size_paper_position(
-            db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
+        quantity = 0.0
+        if is_paper:
+            quantity = await size_paper_position(
+                db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
+            )
+
+        if quantity <= 0:
+            logger.info(
+                "Skipping crypto position creation for %s because position sizer returned zero",
+                signal.symbol,
+                extra={"reason": POSITION_SIZER_RETURNED_ZERO},
+            )
+            return None
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        frozen_policy = {
+            "entry_strategy": signal.strategy,
+            "exit_strategy": self._select_exit_strategy(signal),
+            "initial_stop": signal.initial_stop,
+            "profit_target_1": signal.profit_target_1,
+            "profit_target_2": signal.profit_target_2,
+            "max_hold_hours": signal.max_hold_hours,
+            "hard_max_hold": True,
+            "regime_at_entry": signal.regime,
+            "market_regime": regime_engine.crypto_regime,
+            "watchlist_source_id": ws.watchlist_source_id or "",
+            "management_policy_version": "1.0",
+        }
+
+        position = Position(
+            id=uuid.uuid4(),
+            symbol=canonical,
+            asset_class=ASSET_CLASS,
+            state=PositionState.OPEN,
+            entry_price=signal.entry_price,
+            quantity=quantity,
+            entry_time=now,
+            entry_strategy=signal.strategy,
+            exit_strategy=frozen_policy["exit_strategy"],
+            initial_stop=signal.initial_stop,
+            current_stop=signal.initial_stop,
+            profit_target_1=signal.profit_target_1,
+            profit_target_2=signal.profit_target_2,
+            max_hold_hours=signal.max_hold_hours,
+            regime_at_entry=signal.regime,
+            watchlist_source_id=ws.watchlist_source_id,
+            management_policy_version="1.0",
+            frozen_policy=frozen_policy,
+            milestone_state={"tp1_hit": False},
+            current_price=signal.entry_price,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(position)
+        await db.flush()
+
+        order = Order(
+            id=uuid.uuid4(),
+            position_id=position.id,
+            symbol=canonical,
+            asset_class=ASSET_CLASS,
+            order_type=OrderType.ENTRY,
+            side=OrderSide.BUY,
+            quantity=quantity,
+            requested_price=signal.entry_price,
+            status=OrderStatus.SUBMITTED,
+            placed_at=now,
+        )
+        db.add(order)
+        await db.flush()
+
+        if is_paper and quantity > 0:
+            await record_paper_fill(
+                db, ASSET_CLASS, canonical, position.id, order.id, quantity, signal.entry_price
+            )
+
+        await log_event(
+            db,
+            "POSITION_OPENED",
+            f"New {ASSET_CLASS} position: {canonical} via {signal.strategy}",
+            asset_class=ASSET_CLASS,
+            symbol=canonical,
+            position_id=str(position.id),
+            source=AuditSource.WORKER,
+            event_data={
+                "strategy": signal.strategy,
+                "entry_price": signal.entry_price,
+                "quantity": quantity,
+                "stop": signal.initial_stop,
+                "tp1": signal.profit_target_1,
+                "confidence": signal.confidence,
+                "mode": trading_mode,
+                "regime": signal.regime,
+                "notes": signal.notes,
+                "reasoning": signal.reasoning,
+            },
         )
 
-    if quantity <= 0:
-        logger.info(
-            "Skipping crypto position creation for %s because position sizer returned zero",
-            signal.symbol,
-            extra={"reason": POSITION_SIZER_RETURNED_ZERO},
-        )
-        return None
-
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    frozen_policy = {
-        "entry_strategy": signal.strategy,
-        "exit_strategy": self._select_exit_strategy(signal),
-        "initial_stop": signal.initial_stop,
-        "profit_target_1": signal.profit_target_1,
-        "profit_target_2": signal.profit_target_2,
-        "max_hold_hours": signal.max_hold_hours,
-        "hard_max_hold": True,
-        "regime_at_entry": signal.regime,
-        "market_regime": regime_engine.crypto_regime,
-        "watchlist_source_id": ws.watchlist_source_id or "",
-        "management_policy_version": "1.0",
-    }
-
-    position = Position(
-        id=uuid.uuid4(),
-        symbol=canonical,
-        asset_class=ASSET_CLASS,
-        state=PositionState.OPEN,
-        entry_price=signal.entry_price,
-        quantity=quantity,
-        entry_time=now,
-        entry_strategy=signal.strategy,
-        exit_strategy=frozen_policy["exit_strategy"],
-        initial_stop=signal.initial_stop,
-        current_stop=signal.initial_stop,
-        profit_target_1=signal.profit_target_1,
-        profit_target_2=signal.profit_target_2,
-        max_hold_hours=signal.max_hold_hours,
-        regime_at_entry=signal.regime,
-        watchlist_source_id=ws.watchlist_source_id,
-        management_policy_version="1.0",
-        frozen_policy=frozen_policy,
-        milestone_state={"tp1_hit": False},
-        current_price=signal.entry_price,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(position)
-    await db.flush()
-
-    order = Order(
-        id=uuid.uuid4(),
-        position_id=position.id,
-        symbol=canonical,
-        asset_class=ASSET_CLASS,
-        order_type=OrderType.ENTRY,
-        side=OrderSide.BUY,
-        quantity=quantity,
-        requested_price=signal.entry_price,
-        status=OrderStatus.SUBMITTED,
-        placed_at=now,
-    )
-    db.add(order)
-    await db.flush()
-
-    await log_event(
-        db,
-        "POSITION_OPENED",
-        f"New {ASSET_CLASS} position: {canonical} via {signal.strategy}",
-        asset_class=ASSET_CLASS,
-        symbol=canonical,
-        position_id=str(position.id),
-        source=AuditSource.WORKER,
-        event_data={
-            "strategy": signal.strategy,
-            "entry_price": signal.entry_price,
-            "quantity": quantity,
-            "stop": signal.initial_stop,
-            "tp1": signal.profit_target_1,
-            "confidence": signal.confidence,
-            "mode": trading_mode,
-            "regime": signal.regime,
-            "notes": signal.notes,
-            "reasoning": signal.reasoning,
-        },
-    )
-
-    ws_manager.broadcast_from_thread("position_executed", {
-        "symbol": canonical,
-        "side": "BUY",
-        "quantity": float(quantity),
-        "price": signal.entry_price,
-        "asset_class": ASSET_CLASS,
-    }) 
+        ws_manager.broadcast_from_thread("position_executed", {
+            "symbol": canonical,
+            "side": "BUY",
+            "quantity": float(quantity),
+            "price": signal.entry_price,
+            "asset_class": ASSET_CLASS,
+        })
 
     def _select_exit_strategy(self, signal) -> str:
         if signal.regime == "trending_up":
