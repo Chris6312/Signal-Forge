@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.account_state import get_peak_equity, note_peak_equity
 from app.common.models.ledger import LedgerAccount, LedgerEntry, EntryType
 from app.common.models.order import Order, OrderStatus
-from app.common.position_sizer import compute_position_size
+from app.common.position_sizer import compute_position_size_result
 from app.common.risk_config import resolve_risk_per_trade_pct
 from app.common.runtime_state import runtime_state
 
@@ -53,7 +53,7 @@ async def size_paper_position(
         risk_per_trade_pct if risk_per_trade_pct is not None else runtime_risk_override,
     )
 
-    quantity = compute_position_size(
+    size_result = compute_position_size_result(
         asset_class=asset_class,
         equity=current_equity,
         entry_price=entry_price,
@@ -64,6 +64,18 @@ async def size_paper_position(
         signal=signal,
         reasoning=getattr(signal, "reasoning", None),
     )
+
+    quantity = size_result.quantity
+    if quantity <= 0:
+        logger.info(
+            "Skipping execution: position size resolved to zero",
+            extra={
+                "symbol": getattr(signal, "symbol", None),
+                "strategy": getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None),
+                "decision_reason": POSITION_SIZER_RETURNED_ZERO,
+            },
+        )
+        return 0.0
 
     cost = quantity * entry_price
     cash_cap = account.cash_balance * 0.10

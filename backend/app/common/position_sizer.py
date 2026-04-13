@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
+from dataclasses import dataclass
 
 from app.common.account_state import compute_drawdown_pct, should_block_new_entries
 from app.common.portfolio_exposure import (
@@ -16,6 +17,14 @@ from app.regime.policy import compute_regime_size_multiplier
 
 
 logger = logging.getLogger(__name__)
+
+POSITION_SIZER_RETURNED_ZERO = "POSITION_SIZER_RETURNED_ZERO"
+
+
+@dataclass(frozen=True)
+class PositionSizeResult:
+    quantity: float
+    decision_reason: str
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -302,3 +311,10 @@ def compute_position_size(
     }
     logger.debug("position_sizer=%s", debug_payload)
     return max(0.0, final_size)
+
+
+def compute_position_size_result(*args, **kwargs) -> PositionSizeResult:
+    quantity = compute_position_size(*args, **kwargs)
+    if quantity <= 0:
+        return PositionSizeResult(quantity=0.0, decision_reason=POSITION_SIZER_RETURNED_ZERO)
+    return PositionSizeResult(quantity=quantity, decision_reason="OK")

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.common.position_sizer import _extract_volatility_pct, compute_drawdown_risk_multiplier, compute_position_size, compute_volatility_multiplier
+from app.common.position_sizer import _extract_volatility_pct, compute_drawdown_risk_multiplier, compute_position_size, compute_position_size_result, compute_volatility_multiplier
 from app.common.portfolio_exposure import (
     compute_cluster_exposure_multiplier,
     compute_symbol_concentration_multiplier,
@@ -398,6 +398,22 @@ def test_extremely_small_equity_returns_zero():
         current_equity=5.0,
         peak_equity=5.0,
     ) == 0.0
+
+
+def test_zero_sized_position_returns_zero_decision_reason():
+    result = compute_position_size_result(
+        asset_class="crypto",
+        equity=5.0,
+        entry_price=100.0,
+        stop_distance=5.0,
+        risk_per_trade_pct=0.005,
+        volatility_pct=0.005,
+        current_equity=5.0,
+        peak_equity=5.0,
+    )
+
+    assert result.quantity == 0.0
+    assert result.decision_reason == "POSITION_SIZER_RETURNED_ZERO"
 
 
 @pytest.mark.parametrize(

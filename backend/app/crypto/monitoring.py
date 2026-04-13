@@ -13,6 +13,7 @@ from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
 from app.common.redis_client import get_redis
+from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 from app.common.ws_manager import ws_manager
 from app.crypto.kraken_client import kraken_client
 from app.crypto.strategies.entry_strategies import evaluate_all, _closed_ohlcv, _ema, _normalize_strategy_key
@@ -433,6 +434,18 @@ class CryptoMonitor:
             quantity = await size_paper_position(
                 db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
             )
+
+        if quantity <= 0:
+            logger.info(
+                "Skipping execution: position size resolved to zero",
+                extra={
+                    "symbol": signal.symbol,
+                    "strategy": signal.strategy_key,
+                    "confidence": signal.confidence,
+                    "decision_reason": POSITION_SIZER_RETURNED_ZERO,
+                },
+            )
+            return
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         frozen_policy = {

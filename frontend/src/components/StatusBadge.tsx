@@ -16,6 +16,10 @@ function mapStatus(rawIn: string | null | undefined): Mapped {
   const raw = String(rawIn ?? 'unknown').trim()
   const u = raw.toUpperCase()
 
+  if (['SKIPPED', 'POSITION_SIZER_RETURNED_ZERO'].includes(u)) {
+    return { semantic: 'skipped', label: 'Skipped', cls: 'bg-sky-600/8 text-sky-300 border border-sky-600/30', raw }
+  }
+
   // Friendly operator labels and consistent semantic buckets
   if (['ONLINE', 'RUNNING', 'ACTIVE', 'OPEN', 'FILLED'].includes(u)) {
     return { semantic: 'online', label: 'Online', cls: 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30', raw }

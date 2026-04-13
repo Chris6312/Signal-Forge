@@ -37,6 +37,36 @@ def test_stock_exit_strategy_selection_uses_safe_fallback_for_unknown_labels():
 
 
 @pytest.mark.asyncio
+async def test_stock_monitor_skips_zero_sized_execution(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="XAUT/USD", added_at=None, watchlist_source_id=None)
+    signal = SimpleNamespace(
+        symbol="XAUT/USD",
+        strategy="Pullback Reclaim",
+        strategy_key="pullback_reclaim",
+        entry_price=4600.0,
+        initial_stop=4550.0,
+        profit_target_1=4700.0,
+        profit_target_2=4800.0,
+        max_hold_hours=6,
+        regime="trending_up",
+        confidence=0.82,
+        notes={},
+        reasoning={},
+    )
+
+    monkeypatch.setattr("app.stocks.monitoring.runtime_state.get_trading_mode", AsyncMock(return_value="paper"))
+    monkeypatch.setattr("app.stocks.monitoring.runtime_state.get_risk_per_trade_pct", AsyncMock(return_value=0.005))
+    monkeypatch.setattr("app.common.paper_ledger.size_paper_position", AsyncMock(return_value=0.0))
+
+    await monitor._create_position(db, ws, signal)
+
+    assert db.add.call_count == 0
+    assert db.flush.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_stock_monitor_acquires_intent_lock_and_creates_position(monkeypatch):
     monitor = StockMonitor()
     ws = SimpleNamespace(symbol="AAPL", added_at=None, watchlist_source_id=None)
