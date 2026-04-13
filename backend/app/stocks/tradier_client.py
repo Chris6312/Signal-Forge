@@ -5,7 +5,6 @@ from app.common.config import settings
 logger = logging.getLogger(__name__)
 
 TRADIER_BASE = "https://api.tradier.com/v1"
-TRADIER_SANDBOX = "https://sandbox.tradier.com/v1"
 
 
 class TradierClient:

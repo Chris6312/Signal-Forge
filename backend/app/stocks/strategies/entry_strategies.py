@@ -2,13 +2,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Union
 from typing import Optional
 from app.common.watchlist_schema_v4 import (
     score_strategy_from_candles,
     compute_hint_bias,
     BotDecision,
-    WEIGHTS,
     compute_features_for_signal,
 )
 from app.common.watchlist_schema_v4 import compute_strategy_score
@@ -17,13 +15,30 @@ from app.common.signal_maturity import (
     compute_breakout_extension_pct,
     compute_support_distance_pct,
 )
-from app.common.models.audit import AuditSource
 import json
 from app.common.models.bot_decision import BotStrategyDecision
 from app.common.database import AsyncSessionLocal
 import asyncio
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_stock_strategy_key(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    name = value.strip()
+    strategy_key_map = {
+        "Opening Range Breakout": "opening_range_breakout",
+        "Pullback Reclaim": "pullback_reclaim",
+        "Trend Continuation Ladder": "trend_continuation",
+        "Trend Continuation": "trend_continuation",
+        "Momentum Breakout Continuation": "trend_continuation",
+        "Mean Reversion Bounce": "mean_reversion_bounce",
+        "Failed Breakdown Reclaim": "failed_breakdown_reclaim",
+        "Volatility Compression Breakout": "volatility_compression_breakout",
+    }
+    return strategy_key_map.get(name, name.lower().replace(" ", "_"))
 
 
 @dataclass
@@ -42,19 +57,7 @@ class StockEntrySignal:
 
     @property
     def strategy_key(self) -> str:
-        mapping = {
-            "Opening Range Breakout": "opening_range_breakout",
-            "Pullback Reclaim": "pullback_reclaim",
-            "Trend Continuation Ladder": "trend_continuation",
-            "Trend Continuation": "trend_continuation",
-            "Momentum Breakout Continuation": "trend_continuation",
-            "Mean Reversion Bounce": "mean_reversion_bounce",
-            "Failed Breakdown Reclaim": "failed_breakdown_reclaim",
-            "Volatility Compression Breakout": "volatility_compression_breakout",
-            "Breakout Retest Hold": "breakout_retest",
-            "Range Rotation Reversal": "range_rotation",
-        }
-        return mapping.get(self.strategy, self.strategy.strip().lower().replace(" ", "_"))
+        return _normalize_stock_strategy_key(self.strategy) or ""
 
 
 def _ema(prices: list[float], period: int) -> list[float]:
@@ -280,11 +283,6 @@ def _merge_signal_with_snapshot(signal: StockEntrySignal | None, snapshot: Stock
     if not getattr(signal, "regime", None):
         signal.regime = snapshot.regime
     return signal
-
-
-def _extract_candle_features_from_primary(strategy_key: str, strategy_name: str, symbol: str, primary: list[dict], tf_minutes: int):
-    snapshot = _build_signal_snapshot(strategy_name, strategy_key, symbol, primary, tf_minutes)
-    return compute_features_for_signal(strategy_key, snapshot, asset_class="stock")
 
 def _parse_bar_time(value: str) -> Optional[datetime]:
     if not value:
@@ -852,25 +850,7 @@ STRONG_SIGNAL_THRESHOLD = 0.60
 
 
 def _strategy_name_to_key(name: str) -> str | None:
-    if "Pullback Reclaim" in name:
-        return "pullback_reclaim"
-    if "Failed Breakdown Reclaim" in name:
-        return "failed_breakdown_reclaim"
-    if "Trend Continuation Ladder" in name:
-        return "trend_continuation"
-    if "Trend Continuation" in name or "Momentum Breakout Continuation" in name:
-        return "trend_continuation"
-    if "Mean Reversion Bounce" in name:
-        return "mean_reversion_bounce"
-    if "Opening Range Breakout" in name:
-        return "opening_range_breakout"
-    if "Volatility Compression Breakout" in name:
-        return "volatility_compression_breakout"
-    if "Breakout Retest Hold" in name:
-        return "breakout_retest"
-    if "Range Rotation Reversal" in name:
-        return "range_rotation"
-    return None
+    return _normalize_stock_strategy_key(name)
 
 
 
@@ -884,7 +864,7 @@ def _strategy_specific_bonus(strategy_key: str, signal: StockEntrySignal) -> flo
         if reasoning.get("reclaim_confirmed"):
             bonus += 0.04
 
-    elif strategy_key in {"opening_range_breakout", "volatility_compression_breakout", "breakout_retest"}:
+    elif strategy_key in {"opening_range_breakout", "volatility_compression_breakout"}:
         breakout_pct = float(reasoning.get("breakout_pct") or 0.0)
         breakout_confirmed = bool(
             reasoning.get("higher_highs_confirmed")
@@ -996,9 +976,6 @@ def evaluate_all(
                 "base_score": round(base_score, 6),
                 "raw_signal_present": raw_signal is not None,
             }
-
-            if round(base_score, 6) >= round(MIN_SCORE_THRESHOLD, 6):
-                signals.append(candidate)
 
         except Exception as exc:
             logger.error("Stock strategy %s error for %s: %s", strategy.name, symbol, exc)
