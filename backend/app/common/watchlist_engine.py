@@ -16,6 +16,17 @@ from app.common.watchlist_schema_v4 import validate_symbol_entry
 logger = logging.getLogger(__name__)
 
 
+def _apply_watchlist_metadata(ws: WatchlistSymbol, meta: dict) -> None:
+    if meta.get("reason"):
+        ws.reason = meta["reason"]
+    if meta.get("confidence") is not None:
+        ws.confidence = meta["confidence"]
+    if meta.get("tags") is not None:
+        ws.tags = meta["tags"]
+    if meta.get("notes"):
+        ws.notes = meta["notes"]
+
+
 class WatchlistEngine:
     async def process_update(
         self,
@@ -126,16 +137,8 @@ class WatchlistEngine:
         for symbol, asset_class, meta in incoming_items:
             key = (symbol, asset_class)
             if key in existing_active:
-                # Update metadata on retained active symbols if provided
                 ws = existing_active[key]
-                if meta.get("reason"):
-                    ws.reason = meta["reason"]
-                if meta.get("confidence") is not None:
-                    ws.confidence = meta["confidence"]
-                if meta.get("tags") is not None:
-                    ws.tags = meta["tags"]
-                if meta.get("notes"):
-                    ws.notes = meta["notes"]
+                _apply_watchlist_metadata(ws, meta)
                 retained.append(symbol)
             elif key in existing_managed:
                 ws = existing_managed[key]
@@ -144,14 +147,8 @@ class WatchlistEngine:
                 ws.added_at = now
                 ws.removed_at = None
                 ws.managed_since = None
-                if meta.get("reason"):
-                    ws.reason = meta["reason"]
-                if meta.get("confidence") is not None:
-                    ws.confidence = meta["confidence"]
-                if meta.get("tags") is not None:
-                    ws.tags = meta["tags"]
-                if meta.get("notes"):
-                    ws.notes = meta["notes"]
+                ws.closed_at = None
+                _apply_watchlist_metadata(ws, meta)
                 promoted.append(symbol)
             else:
                 ws = WatchlistSymbol(
