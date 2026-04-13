@@ -31,6 +31,14 @@ ASSET_CLASS = "stock"
 COOLDOWN_KEY_PREFIX = "cooldown:stock:"
 INTENT_KEY_PREFIX = "intent:stock:"
 INTENT_LOCK_TTL_SECONDS = 60
+STOCK_EXIT_STRATEGY_BY_KEY = {
+    "opening_range_breakout": "End-of-Day Exit",
+    "pullback_reclaim": "Fixed Risk then Break-Even Promotion",
+    "trend_continuation": "Partial at TP1, Trail Remainder",
+    "mean_reversion_bounce": "First Failed Follow-Through Exit",
+    "failed_breakdown_reclaim": "Fixed Risk then Break-Even Promotion",
+    "volatility_compression_breakout": "Partial at TP1, Trail Remainder",
+}
 
 
 def _strategy_key(value: str | None) -> str | None:
@@ -384,12 +392,15 @@ class StockMonitor:
         })
 
     def _select_exit_strategy(self, signal) -> str:
-        if "Opening Range" in signal.strategy:
-            return "End-of-Day Exit"
-        if "Breakout" in signal.strategy or "Continuation" in signal.strategy:
-            return "Partial at TP1, Trail Remainder"
-        if "Mean Reversion" in signal.strategy:
-            return "First Failed Follow-Through Exit"
+        strategy_key = _signal_key(signal)
+        if strategy_key in STOCK_EXIT_STRATEGY_BY_KEY:
+            return STOCK_EXIT_STRATEGY_BY_KEY[strategy_key]
+
+        strategy_name = getattr(signal, "strategy", None)
+        normalized_key = _strategy_key(strategy_name)
+        if normalized_key in STOCK_EXIT_STRATEGY_BY_KEY:
+            return STOCK_EXIT_STRATEGY_BY_KEY[normalized_key]
+
         return "Fixed Risk then Break-Even Promotion"
 
     async def _has_open_position(self, db, symbol: str) -> bool:

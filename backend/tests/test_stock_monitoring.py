@@ -6,6 +6,36 @@ import pytest
 from app.stocks.monitoring import StockMonitor
 
 
+def _signal(strategy: str, strategy_key: str | None = None):
+    return SimpleNamespace(strategy=strategy, strategy_key=strategy_key)
+
+
+@pytest.mark.parametrize(
+    ("strategy_key", "strategy", "expected_exit_strategy"),
+    [
+        ("opening_range_breakout", "Opening Range Breakout", "End-of-Day Exit"),
+        ("trend_continuation", "Trend Continuation", "Partial at TP1, Trail Remainder"),
+        ("volatility_compression_breakout", "Volatility Compression Breakout", "Partial at TP1, Trail Remainder"),
+        ("mean_reversion_bounce", "Mean Reversion Bounce", "First Failed Follow-Through Exit"),
+        ("pullback_reclaim", "Pullback Reclaim", "Fixed Risk then Break-Even Promotion"),
+        ("failed_breakdown_reclaim", "Failed Breakdown Reclaim", "Fixed Risk then Break-Even Promotion"),
+    ],
+)
+def test_stock_exit_strategy_selection_uses_canonical_strategy_key(strategy_key, strategy, expected_exit_strategy):
+    monitor = StockMonitor()
+    assert monitor._select_exit_strategy(_signal(strategy, strategy_key)) == expected_exit_strategy
+
+
+def test_stock_exit_strategy_selection_ignores_human_readable_label_changes_when_key_is_stable():
+    monitor = StockMonitor()
+    assert monitor._select_exit_strategy(_signal("Renamed breakout label", "opening_range_breakout")) == "End-of-Day Exit"
+
+
+def test_stock_exit_strategy_selection_uses_safe_fallback_for_unknown_labels():
+    monitor = StockMonitor()
+    assert monitor._select_exit_strategy(_signal("Legacy Strategy Label", "legacy_label")) == "Fixed Risk then Break-Even Promotion"
+
+
 @pytest.mark.asyncio
 async def test_stock_monitor_acquires_intent_lock_and_creates_position(monkeypatch):
     monitor = StockMonitor()
