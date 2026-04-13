@@ -10,11 +10,16 @@ from app.stocks.strategies.exit_strategies import StockExitDecision
 from tests.conftest import trending_up_history
 
 
-@pytest.mark.asyncio
-async def test_stock_exit_worker_hard_max_hold_uses_shared_helper(monkeypatch):
-    worker = StockExitWorker()
+def _make_db(result=None):
     db = AsyncMock()
-    position = SimpleNamespace(
+    db.add = MagicMock()
+    db.flush = AsyncMock()
+    db.execute = AsyncMock(return_value=result) if result is not None else AsyncMock()
+    return db
+
+
+def _make_position(**overrides):
+    base = dict(
         id=uuid4(),
         symbol="AAPL",
         asset_class="stock",
@@ -27,16 +32,22 @@ async def test_stock_exit_worker_hard_max_hold_uses_shared_helper(monkeypatch):
         profit_target_1=108.0,
         profit_target_2=115.0,
         milestone_state={},
-        frozen_policy={"hard_max_hold": True},
-        max_hold_hours=24,
+        frozen_policy={},
+        max_hold_hours=None,
         exit_strategy="Partial at TP1, Dynamic Trail on Runner",
         pnl_realized=0.0,
         pnl_unrealized=0.0,
+        fees_paid=0.0,
     )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
-    db.add = MagicMock()
-    db.flush = AsyncMock()
-    db.execute = AsyncMock()
+
+@pytest.mark.asyncio
+async def test_stock_exit_worker_hard_max_hold_uses_shared_helper(monkeypatch):
+    worker = StockExitWorker()
+    db = _make_db()
+    position = _make_position(frozen_policy={"hard_max_hold": True}, max_hold_hours=24)
 
     close_position = AsyncMock()
     monkeypatch.setattr(worker, "_close_position", close_position)
@@ -62,33 +73,11 @@ async def test_stock_exit_worker_hard_max_hold_uses_shared_helper(monkeypatch):
 @pytest.mark.asyncio
 async def test_stock_exit_worker_tp1_partial_promotes_break_even_and_persists(monkeypatch):
     worker = StockExitWorker()
-    db = AsyncMock()
+    db = _make_db(MagicMock())
     result = MagicMock()
     result.scalar_one_or_none.return_value = None
     db.execute = AsyncMock(return_value=result)
-    db.add = MagicMock()
-    db.flush = AsyncMock()
-
-    position = SimpleNamespace(
-        id=uuid4(),
-        symbol="AAPL",
-        asset_class="stock",
-        state=PositionState.OPEN,
-        entry_price=100.0,
-        quantity=10.0,
-        entry_time=None,
-        initial_stop=93.0,
-        current_stop=93.0,
-        profit_target_1=108.0,
-        profit_target_2=115.0,
-        milestone_state={},
-        frozen_policy={},
-        max_hold_hours=None,
-        exit_strategy="Partial at TP1, Trail Remainder",
-        pnl_realized=0.0,
-        pnl_unrealized=0.0,
-        fees_paid=0.0,
-    )
+    position = _make_position(current_stop=93.0, exit_strategy="Partial at TP1, Trail Remainder")
 
     redis = SimpleNamespace(set=AsyncMock(return_value=True), delete=AsyncMock())
     monkeypatch.setattr("app.stocks.exit_worker.get_redis", AsyncMock(return_value=redis))
@@ -114,23 +103,10 @@ async def test_stock_exit_worker_tp1_partial_promotes_break_even_and_persists(mo
 @pytest.mark.asyncio
 async def test_stock_exit_worker_promoted_floor_breach_exits_immediately(monkeypatch):
     worker = StockExitWorker()
-    db = AsyncMock()
-    db.execute = AsyncMock()
-    db.add = MagicMock()
-    db.flush = AsyncMock()
-
-    position = SimpleNamespace(
-        id=uuid4(),
-        symbol="AAPL",
-        asset_class="stock",
-        state=PositionState.OPEN,
-        entry_price=100.0,
+    db = _make_db()
+    position = _make_position(
         quantity=5.0,
-        entry_time=None,
-        initial_stop=93.0,
         current_stop=100.0,
-        profit_target_1=108.0,
-        profit_target_2=115.0,
         milestone_state={
             "tp1_hit": True,
             "tp1_price": 108.0,
@@ -138,11 +114,6 @@ async def test_stock_exit_worker_promoted_floor_breach_exits_immediately(monkeyp
             "trailing_stop": 104.0,
             "trail_active": True,
         },
-        frozen_policy={},
-        max_hold_hours=None,
-        exit_strategy="Partial at TP1, Trail Remainder",
-        pnl_realized=0.0,
-        pnl_unrealized=0.0,
         break_even_floor=100.0,
         promoted_floor=104.0,
         highest_promoted_floor=104.0,
@@ -164,25 +135,13 @@ async def test_stock_exit_worker_promoted_floor_breach_exits_immediately(monkeyp
 @pytest.mark.asyncio
 async def test_stock_exit_worker_follow_through_promotion_raises_floor_after_tp1(monkeypatch):
     worker = StockExitWorker()
-    db = AsyncMock()
+    db = _make_db(MagicMock())
     result = MagicMock()
     result.scalar_one_or_none.return_value = None
     db.execute = AsyncMock(return_value=result)
-    db.add = MagicMock()
-    db.flush = AsyncMock()
-
-    position = SimpleNamespace(
-        id=uuid4(),
-        symbol="AAPL",
-        asset_class="stock",
-        state=PositionState.OPEN,
-        entry_price=100.0,
+    position = _make_position(
         quantity=5.0,
-        entry_time=None,
-        initial_stop=93.0,
         current_stop=100.0,
-        profit_target_1=108.0,
-        profit_target_2=115.0,
         milestone_state={
             "tp1_hit": True,
             "tp1_price": 108.0,
@@ -190,11 +149,6 @@ async def test_stock_exit_worker_follow_through_promotion_raises_floor_after_tp1
             "trailing_stop": 100.0,
             "trail_active": True,
         },
-        frozen_policy={},
-        max_hold_hours=None,
-        exit_strategy="Partial at TP1, Trail Remainder",
-        pnl_realized=0.0,
-        pnl_unrealized=0.0,
         break_even_floor=100.0,
         promoted_floor=100.0,
         highest_promoted_floor=100.0,

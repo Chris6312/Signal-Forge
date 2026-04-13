@@ -99,6 +99,29 @@ async def test_stock_monitor_uses_backend_top_strategy_for_execution(monkeypatch
     assert create_position.await_args.args[2] is second
 
 
+def _configure_crypto_monitor(monkeypatch, monitor, signals, top_strategy, top_confidence, *, latest_close_ts=100.0, frame_info=None, store_get_result=None):
+    monkeypatch.setattr(
+        "app.crypto.monitoring.evaluate_all",
+        lambda *args, **kwargs: {"signals": signals, "top_strategy": top_strategy, "top_confidence": top_confidence},
+    )
+    monkeypatch.setattr("app.crypto.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "app.crypto.monitoring.get_redis",
+        AsyncMock(return_value=SimpleNamespace(setnx=AsyncMock(return_value=True), expire=AsyncMock(), exists=AsyncMock(return_value=False), delete=AsyncMock())),
+    )
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    create_position = AsyncMock()
+    monkeypatch.setattr(monitor, "_create_position", create_position)
+    monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    if latest_close_ts is not None:
+        monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: latest_close_ts)
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: frame_info or {})
+    if store_get_result is not None:
+        monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: store_get_result)
+    return create_position
+
+
 def test_readiness_memory_blocks_until_support_recovers_materially():
     runtime_state.clear_monitoring_readiness_memory()
 
@@ -563,23 +586,14 @@ async def test_crypto_monitor_blocks_breakout_retest_when_lower_timeframe_reclai
         reasoning={"execution_ready": True, "execution_confidence_cap": 0.91, "execution_block_reason": None},
     )
 
-    monkeypatch.setattr(
-        "app.crypto.monitoring.evaluate_all",
-        lambda *args, **kwargs: {"signals": [signal], "top_strategy": "breakout_retest", "top_confidence": 0.91},
+    create_position = _configure_crypto_monitor(
+        monkeypatch,
+        monitor,
+        [signal],
+        "breakout_retest",
+        0.91,
+        store_get_result=trending_down_ohlcv(30, start=120.0, end=90.0),
     )
-    monkeypatch.setattr("app.crypto.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
-    monkeypatch.setattr(
-        "app.crypto.monitoring.get_redis",
-        AsyncMock(return_value=SimpleNamespace(setnx=AsyncMock(return_value=True), expire=AsyncMock(), exists=AsyncMock(return_value=False), delete=AsyncMock())),
-    )
-    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
-    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
-    create_position = AsyncMock()
-    monkeypatch.setattr(monitor, "_create_position", create_position)
-    monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
-    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
-    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
-    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: trending_down_ohlcv(30, start=120.0, end=90.0))
 
     await monitor._evaluate_symbol(db, ws)
 
@@ -598,22 +612,7 @@ async def test_crypto_monitor_caps_pullback_reclaim_until_true_reclaim_confirmed
         reasoning={"execution_ready": True, "execution_confidence_cap": 0.92, "execution_block_reason": None},
     )
 
-    monkeypatch.setattr(
-        "app.crypto.monitoring.evaluate_all",
-        lambda *args, **kwargs: {"signals": [signal], "top_strategy": "pullback_reclaim", "top_confidence": 0.92},
-    )
-    monkeypatch.setattr("app.crypto.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
-    monkeypatch.setattr(
-        "app.crypto.monitoring.get_redis",
-        AsyncMock(return_value=SimpleNamespace(setnx=AsyncMock(return_value=True), expire=AsyncMock(), exists=AsyncMock(return_value=False), delete=AsyncMock())),
-    )
-    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
-    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
-    create_position = AsyncMock()
-    monkeypatch.setattr(monitor, "_create_position", create_position)
-    monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
-    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
-    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
+    create_position = _configure_crypto_monitor(monkeypatch, monitor, [signal], "pullback_reclaim", 0.92)
 
     pullback = trending_up_ohlcv(30, start=100.0, end=108.0)
     pullback[-2] = make_candle(28, 103.0)
@@ -638,26 +637,18 @@ async def test_crypto_monitor_blocks_momentum_breakout_when_follow_through_fails
         reasoning={"execution_ready": True, "execution_confidence_cap": 0.94, "execution_block_reason": None},
     )
 
-    monkeypatch.setattr(
-        "app.crypto.monitoring.evaluate_all",
-        lambda *args, **kwargs: {"signals": [signal], "top_strategy": "trend_continuation", "top_confidence": 0.94},
-    )
-    monkeypatch.setattr("app.crypto.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
-    monkeypatch.setattr(
-        "app.crypto.monitoring.get_redis",
-        AsyncMock(return_value=SimpleNamespace(setnx=AsyncMock(return_value=True), expire=AsyncMock(), exists=AsyncMock(return_value=False), delete=AsyncMock())),
-    )
-    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
-    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
-    create_position = AsyncMock()
-    monkeypatch.setattr(monitor, "_create_position", create_position)
-    monkeypatch.setattr("app.crypto.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
-    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
-
     failed_follow_through = trending_up_ohlcv(30, start=100.0, end=125.0)
     failed_follow_through[-2] = make_candle(28, 124.0)
     failed_follow_through[-1] = make_candle(29, 121.0)
-    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: failed_follow_through)
+    create_position = _configure_crypto_monitor(
+        monkeypatch,
+        monitor,
+        [signal],
+        "trend_continuation",
+        0.94,
+        frame_info={},
+        store_get_result=failed_follow_through,
+    )
 
     await monitor._evaluate_symbol(db, ws)
 

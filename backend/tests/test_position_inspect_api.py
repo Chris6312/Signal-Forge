@@ -4,6 +4,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.conftest import make_hold_metrics
+
 
 def test_position_api_returns_tp1_milestone_and_promoted_floor(api_client, mock_db, monkeypatch):
     db, result = mock_db
@@ -34,18 +36,7 @@ def test_position_api_returns_tp1_milestone_and_promoted_floor(api_client, mock_
     result.scalar_one_or_none.return_value = position
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=6.2,
-            max_hold_hours=24,
-            hold_ratio=0.2583333333,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 6.2,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.2583333333,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(6.2, 24, 0.2583333333, "green"),
     )
 
     response = api_client.get(f"/api/positions/{position.id}")
@@ -89,18 +80,7 @@ def test_open_positions_api_returns_hold_metrics(api_client, mock_db, monkeypatc
     result.scalars.return_value.all.return_value = [position]
     monkeypatch.setattr(
         "app.api.routes.positions.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=6.2,
-            max_hold_hours=24,
-            hold_ratio=0.2583333333,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 6.2,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.2583333333,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(6.2, 24, 0.2583333333, "green"),
     )
 
     response = api_client.get("/api/positions/open")
@@ -148,18 +128,7 @@ def test_position_api_returns_persisted_stock_runner_floor_without_regression(ap
     result.scalar_one_or_none.return_value = position
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=6.2,
-            max_hold_hours=24,
-            hold_ratio=0.2583333333,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 6.2,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.2583333333,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(6.2, 24, 0.2583333333, "green"),
     )
 
     response = api_client.get(f"/api/positions/{position.id}")

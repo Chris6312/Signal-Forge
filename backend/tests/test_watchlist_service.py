@@ -5,6 +5,7 @@ import pytest
 
 from app.common.position_time import compute_position_hold_metrics
 from app.services.watchlist_service import build_position_inspect_payload
+from tests.conftest import make_hold_metrics
 
 
 @pytest.mark.parametrize(
@@ -70,18 +71,7 @@ def test_build_position_inspect_payload_includes_hold_metrics(monkeypatch):
 
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=6.2,
-            max_hold_hours=24,
-            hold_ratio=0.2583333333,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 6.2,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.2583333333,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(6.2, 24, 0.2583333333, "green"),
     )
 
     payload = build_position_inspect_payload(position)
@@ -129,18 +119,7 @@ def test_build_position_inspect_payload_preserves_frozen_policy_and_milestone_st
 
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=12.5,
-            max_hold_hours=36,
-            hold_ratio=0.3472222222,
-            time_risk_state="yellow",
-            as_dict=lambda: {
-                "hours_held": 12.5,
-                "max_hold_hours": 36,
-                "hold_ratio": 0.3472222222,
-                "time_risk_state": "yellow",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(12.5, 36, 0.3472222222, "yellow"),
     )
 
     payload = build_position_inspect_payload(position)
@@ -194,18 +173,7 @@ def test_build_position_inspect_payload_includes_risk_controls(monkeypatch):
 
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=4.0,
-            max_hold_hours=24,
-            hold_ratio=0.1666666667,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 4.0,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.1666666667,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(4.0, 24, 0.1666666667, "green"),
     )
 
     payload = build_position_inspect_payload(position)
@@ -249,18 +217,7 @@ def test_build_position_inspect_payload_omits_risk_controls_when_missing(monkeyp
 
     monkeypatch.setattr(
         "app.services.watchlist_service.compute_position_hold_metrics",
-        lambda *args, **kwargs: SimpleNamespace(
-            hours_held=2.0,
-            max_hold_hours=24,
-            hold_ratio=0.0833333333,
-            time_risk_state="green",
-            as_dict=lambda: {
-                "hours_held": 2.0,
-                "max_hold_hours": 24,
-                "hold_ratio": 0.0833333333,
-                "time_risk_state": "green",
-            },
-        ),
+        lambda *args, **kwargs: make_hold_metrics(2.0, 24, 0.0833333333, "green"),
     )
 
     payload = build_position_inspect_payload(position)

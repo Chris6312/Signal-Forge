@@ -1,6 +1,5 @@
 """Shared fixtures and OHLCV / history builder helpers."""
 import math
-from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -8,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api.deps import get_db_session
+from app.common.position_time import PositionHoldMetrics
 
 
 # ---------------------------------------------------------------------------
@@ -59,22 +59,18 @@ def ranging_history(n: int = 65, center: float = 100.0, amplitude: float = 2.0) 
     return [make_bar(center + amplitude * math.sin(i * 0.5)) for i in range(n)]
 
 
+def make_hold_metrics(hours_held: float, max_hold_hours: int | float | None, hold_ratio: float | None, time_risk_state: str | None) -> PositionHoldMetrics:
+    return PositionHoldMetrics(
+        hours_held=hours_held,
+        max_hold_hours=max_hold_hours,
+        hold_ratio=hold_ratio,
+        time_risk_state=time_risk_state,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def open_position():
-    """Generic open position used by exit-strategy tests."""
-    return SimpleNamespace(
-        entry_price=100.0,
-        initial_stop=93.0,
-        current_stop=None,
-        profit_target_1=108.0,
-        profit_target_2=115.0,
-        milestone_state={},
-    )
-
 
 @pytest.fixture
 def mock_db():

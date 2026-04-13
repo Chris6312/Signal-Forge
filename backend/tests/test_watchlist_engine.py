@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -6,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.common.watchlist_engine import watchlist_engine
 from app.common.models.watchlist import WatchlistSymbol, SymbolState
-from app.common.database import AsyncSessionLocal
 
 
 def test_process_update_adds_and_updates(monkeypatch):
@@ -38,6 +36,8 @@ def test_process_update_adds_and_updates(monkeypatch):
     ]
 
     import asyncio
+    import asyncio
+
     result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=None))
 
     assert result['total'] == 2
@@ -101,6 +101,8 @@ def test_process_update_v4_validation_and_ai_hint(monkeypatch):
     ]
 
     meta = {"schema_version": "bot_watchlist_v4", "timestamp": datetime.now(timezone.utc).isoformat()}
+    import asyncio
+
     result = asyncio.run(watchlist_engine.process_update(payload, source_id='unittest', payload_meta=meta))
     # One valid (BTC/USD) added, one invalid skipped
     assert result['total'] == 1
@@ -142,6 +144,8 @@ def test_process_update_promotes_managed_symbol_and_clears_closed_at(monkeypatch
             return False
 
     monkeypatch.setattr('app.common.watchlist_engine.AsyncSessionLocal', lambda: _Ctx(fake_db))
+
+    import asyncio
 
     result = asyncio.run(
         watchlist_engine.process_update(
