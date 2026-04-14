@@ -110,6 +110,45 @@ function formatRiskMultiplierLabel(key: string) {
   return labels[key] || key.replace(/_/g, ' ')
 }
 
+function formatPolicyKey(key: string) {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase())
+}
+
+function formatPolicyValue(value: unknown): React.ReactNode {
+  if (value == null) return '—'
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'number') return Number.isInteger(value) ? value.toString() : value.toFixed(4).replace(/\.0+$/, '')
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.length ? value.map(item => formatPolicyValue(item)).join(', ') : '—'
+  return '—'
+}
+
+function renderPolicyDetails(value: unknown, depth = 0): React.ReactNode {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return formatPolicyValue(value)
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+  if (entries.length === 0) return '—'
+
+  return (
+    <div className={clsx('space-y-1', depth > 0 && 'ml-3 pl-3 border-l border-surface-border/40')}>
+      {entries.map(([key, nestedValue]) => (
+        <div key={key} className="leading-snug">
+          <span className="text-gray-500">{formatPolicyKey(key)}:</span>{' '}
+          <span className="text-white">
+            {nestedValue && typeof nestedValue === 'object' && !Array.isArray(nestedValue)
+              ? renderPolicyDetails(nestedValue, depth + 1)
+              : formatPolicyValue(nestedValue)}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function holdColorClass(state?: string | null, ratio?: number | null) {
   const normalized = state?.toLowerCase()
   if (normalized === 'green') return 'text-system-online drop-shadow-[0_0_8px_rgba(16,185,129,0.25)]'
@@ -333,7 +372,6 @@ export default function Positions() {
                                 {trailActive && milestone?.trailing_stop && (
                                   <div className="ml-2 text-[11px] text-gray-300">Trailing Stop: {formatCurrency(Number(milestone.trailing_stop))}</div>
                                 )}
-                                <div className="ml-2">Frozen Exit: {row.original.frozen_policy?.exit_strategy || row.original.exit_strategy || 'N/A'}</div>
                               </div>
                             </div>
 
@@ -362,8 +400,14 @@ export default function Positions() {
                               <SubMetric label="REALIZED_PnL" value={formatPnL(row.original.pnl_realized)} color={row.original.pnl_realized && row.original.pnl_realized >= 0 ? "text-system-online" : "text-system-offline"} icon={<Wallet size={10} />} />
                               <div className="text-[12px] mono text-gray-400 mt-1">
                                 <div>MANAGEMENT_POLICY: <span className="text-white ml-1">{row.original.management_policy_version || 'unknown'}</span></div>
-                                <div className="mt-1">MILESTONE_STATE: <span className="text-white ml-1">{JSON.stringify(row.original.milestone_state || {})}</span></div>
-                                <div className="mt-1">FROZEN_POLICY: <span className="text-white ml-1">{JSON.stringify(row.original.frozen_policy || {})}</span></div>
+                                <div className="mt-1 flex flex-col gap-1">
+                                  <div>MILESTONE_STATE:</div>
+                                  <div className="text-white ml-1">{renderPolicyDetails(row.original.milestone_state || {})}</div>
+                                </div>
+                                <div className="mt-1 flex flex-col gap-1">
+                                  <div>FROZEN_POLICY:</div>
+                                  <div className="text-white ml-1">{renderPolicyDetails(row.original.frozen_policy || {})}</div>
+                                </div>
                               </div>
                             </div>
                           </div>
