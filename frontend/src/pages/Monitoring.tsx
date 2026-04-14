@@ -20,6 +20,7 @@ import {
   ArrowUpDown,
   ChevronRight,
   Zap,
+  Info,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -110,7 +111,13 @@ interface StrategyDiagnosticCardData {
   selected?: boolean
 }
 
-const columnHelper = createColumnHelper()
+type DiagnosticItem = {
+  shortLabel: string
+  detail?: string | null
+  tone?: 'default' | 'good' | 'warn' | 'bad'
+}
+
+const columnHelper: any = createColumnHelper()
 
 const STRATEGY_KEY_TO_LABEL: Record<string, string> = {
   pullback_reclaim: 'Pullback Reclaim',
@@ -136,6 +143,36 @@ function inferStrategyKey(strategyLabel: string): string {
 
 function hasText(value: string | null | undefined): value is string {
   return typeof value === 'string' && value.trim().length > 0
+}
+
+function toTitleCase(value?: string | null): string {
+  if (!value) return '—'
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function formatReasonText(value?: string | null): string {
+  if (!value) return '—'
+
+  const normalized = value.trim().toLowerCase()
+
+  const specialMap: Record<string, string> = {
+    true_reclaim_not_confirmed: 'True reclaim not confirmed',
+    regime_block: 'Blocked by regime gate',
+    open_position_exists: 'Open position already exists',
+    cooldown_active: 'Cooldown is active',
+    waiting_for_setup: 'Waiting for setup',
+    monitor_only: 'Monitor only',
+    managed_only: 'Managed only',
+    session_closed: 'Session closed',
+    position_sizer_returned_zero: 'Position sizer returned zero',
+  }
+
+  if (specialMap[normalized]) return specialMap[normalized]
+  return toTitleCase(value)
 }
 
 function resolveCandidateStrategy(row: Candidate): string {
@@ -189,7 +226,7 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
     const cards = Object.entries(result.evaluated_strategy_scores)
       .map(([strategyKey, confidence]) => ({
         strategyKey,
-        strategyLabel: STRATEGY_KEY_TO_LABEL[strategyKey] ?? strategyKey,
+        strategyLabel: STRATEGY_KEY_TO_LABEL[strategyKey] ?? toTitleCase(strategyKey),
         confidence,
         regime: regimeFallback,
         evaluation: result.evaluated_strategies?.[strategyKey],
@@ -222,7 +259,7 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
 
       return {
         strategyKey,
-        strategyLabel: sig.strategy,
+        strategyLabel: STRATEGY_KEY_TO_LABEL[strategyKey] ?? sig.strategy ?? toTitleCase(strategyKey),
         confidence: sig.confidence,
         regime: sig.regime,
         evaluation,
@@ -236,6 +273,195 @@ function normalizeStrategyCards(result: EvalResult | null): StrategyDiagnosticCa
   }
 
   return cards
+}
+
+function buildDiagnosticItems(row: Candidate): DiagnosticItem[] {
+  const items: DiagnosticItem[] = []
+
+  if (row.evaluation_error) {
+    items.push({
+      shortLabel: 'ERR',
+      detail: row.evaluation_error,
+      tone: 'bad',
+    })
+  }
+
+  const posStatus = String(row.position_or_order_status || '')
+
+  if (row.has_open_position || /OPEN/i.test(posStatus)) {
+    items.push({
+      shortLabel: 'OPEN_POS',
+      detail: row.position_or_order_status
+        ? `Position or order status: ${formatReasonText(row.position_or_order_status)}`
+        : 'An open position or active order already exists for this symbol.',
+      tone: 'warn',
+    })
+  }
+
+  if (row.cooldown_active) {
+    items.push({
+      shortLabel: 'COOLDOWN',
+      detail: 'Entry is paused because the symbol is still inside its cooldown window.',
+      tone: 'warn',
+    })
+  }
+
+  if (row.regime_allowed === false) {
+    items.push({
+      shortLabel: 'REGIME_BLOCK',
+      detail: row.blocked_reason
+        ? `Blocked by regime gate. ${formatReasonText(row.blocked_reason)}.`
+        : 'Local setup may look supportive, but the higher-level regime gate is currently blocking new entries.',
+      tone: 'bad',
+    })
+  }
+
+  if (row.blocked_reason) {
+    items.push({
+      shortLabel: 'BLOCKED',
+      detail: formatReasonText(row.blocked_reason),
+      tone: 'bad',
+    })
+  }
+
+  if (row.resolvedLifecycleState) {
+    items.push({
+      shortLabel: row.resolvedLifecycleState,
+      detail: `Lifecycle state: ${formatReasonText(row.resolvedLifecycleState)}.`,
+      tone: 'default',
+    })
+  }
+
+  if (row.resolvedDecisionState) {
+    items.push({
+      shortLabel: row.resolvedDecisionState,
+      detail: `Decision state: ${formatReasonText(row.resolvedDecisionState)}.`,
+      tone: 'default',
+    })
+  }
+
+  if (row.resolvedDecisionReason) {
+    items.push({
+      shortLabel: row.resolvedDecisionReason,
+      detail: `Decision reason: ${formatReasonText(row.resolvedDecisionReason)}.`,
+      tone: 'default',
+    })
+  }
+
+  if (items.length === 0) {
+    items.push({
+      shortLabel: 'READY',
+      detail: 'No blocking flags are active. This symbol is clear to continue through the monitoring flow.',
+      tone: 'good',
+    })
+  }
+
+  return items
+}
+
+function diagToneClass(tone?: DiagnosticItem['tone']) {
+  if (tone === 'good') return 'text-system-online'
+  if (tone === 'warn') return 'text-system-warning'
+  if (tone === 'bad') return 'text-system-offline'
+  return 'text-gray-400'
+}
+
+function buildTooltipText(row: Candidate, items: DiagnosticItem[]) {
+  const strategy = resolveCandidateStrategy(row)
+  const confidence = `${(resolveCandidateConfidence(row) * 100).toFixed(0)}%`
+
+  const lines = [
+    `Symbol: ${row.symbol}`,
+    `Asset Class: ${toTitleCase(row.asset_class)}`,
+    `Top Strategy: ${strategy}`,
+    `Confidence: ${confidence}`,
+  ]
+
+  for (const item of items) {
+    lines.push(`${item.shortLabel}: ${item.detail || 'No additional detail.'}`)
+  }
+
+  return lines.join('\n')
+}
+
+function DiagnosticBadge({
+  item,
+}: {
+  item: DiagnosticItem
+}) {
+  return (
+    <span className={clsx('font-mono', diagToneClass(item.tone))}>
+      {item.shortLabel}
+    </span>
+  )
+}
+
+function DiagnosticCell({
+  row,
+}: {
+  row: Candidate
+}) {
+  const items = buildDiagnosticItems(row)
+  const tooltipText = buildTooltipText(row, items)
+
+  return (
+    <div className="group/diag relative inline-flex items-center gap-2 max-w-[380px]">
+      <div
+        className="text-[10px] mono flex flex-wrap gap-x-1 gap-y-0.5 items-center cursor-help"
+        title={tooltipText}
+      >
+        {items.map((item, idx) => (
+          <span key={`${item.shortLabel}-${idx}`} className="inline-flex items-center gap-1">
+            <DiagnosticBadge item={item} />
+            {idx < items.length - 1 ? <span className="text-gray-600">•</span> : null}
+          </span>
+        ))}
+      </div>
+
+      <div className="hidden md:block relative">
+        <Info
+          size={12}
+          className="text-gray-600 group-hover/diag:text-brand transition-colors cursor-help"
+        />
+
+        <div className="pointer-events-none absolute left-full top-1/2 z-30 ml-3 hidden w-[340px] -translate-y-1/2 rounded-lg border border-surface-border bg-[#0b0f19] p-3 text-xs text-gray-300 shadow-2xl group-hover/diag:block">
+          <div className="mb-2 text-[10px] font-mono uppercase tracking-widest text-brand">
+            Diagnostic Detail
+          </div>
+
+          <div className="space-y-2">
+            <div className="grid grid-cols-[110px_1fr] gap-2">
+              <div className="text-gray-500 font-mono uppercase text-[10px]">Symbol</div>
+              <div className="text-white font-mono">{row.symbol}</div>
+            </div>
+
+            <div className="grid grid-cols-[110px_1fr] gap-2">
+              <div className="text-gray-500 font-mono uppercase text-[10px]">Top Strategy</div>
+              <div className="text-white">{resolveCandidateStrategy(row)}</div>
+            </div>
+
+            <div className="grid grid-cols-[110px_1fr] gap-2">
+              <div className="text-gray-500 font-mono uppercase text-[10px]">Confidence</div>
+              <div className="text-white">{(resolveCandidateConfidence(row) * 100).toFixed(0)}%</div>
+            </div>
+
+            <div className="border-t border-surface-border pt-2 space-y-2">
+              {items.map((item, idx) => (
+                <div key={`${item.shortLabel}-tooltip-${idx}`} className="space-y-1">
+                  <div className={clsx('text-[10px] font-mono uppercase tracking-widest', diagToneClass(item.tone))}>
+                    {item.shortLabel}
+                  </div>
+                  <div className="text-gray-300 leading-relaxed">
+                    {item.detail || 'No additional detail.'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export default function Monitoring() {
@@ -343,25 +569,7 @@ export default function Monitoring() {
     columnHelper.display({
       id: 'diagnostics',
       header: 'DIAG',
-      cell: (info: any) => {
-        const row = info.row.original
-        const parts: string[] = []
-        if (row.evaluation_error) parts.push('ERR')
-        const posStatus = String(row.position_or_order_status || '')
-        if (row.has_open_position || /OPEN/i.test(posStatus)) parts.push('OPEN_POS')
-        if (row.cooldown_active) parts.push('COOLDOWN')
-        if (row.regime_allowed === false) parts.push('REGIME_BLOCK')
-        if (row.blocked_reason) parts.push('BLOCKED')
-        if (row.resolvedLifecycleState) parts.push(row.resolvedLifecycleState)
-        if (row.resolvedDecisionState) parts.push(row.resolvedDecisionState)
-        if (row.resolvedDecisionReason) parts.push(row.resolvedDecisionReason)
-
-        return (
-          <div className="text-[10px] mono text-gray-400">
-            {parts.length === 0 ? <span className="text-system-online">READY</span> : parts.join(' • ')}
-          </div>
-        )
-      },
+      cell: (info: any) => <DiagnosticCell row={info.row.original as Candidate} />,
     }),
     columnHelper.accessor('asset_class', {
       header: 'NODE',
@@ -378,7 +586,7 @@ export default function Monitoring() {
         const val = resolveCandidateStrategy(row)
         return (
           <span className="text-xs font-mono font-medium text-gray-300 uppercase tracking-wider bg-surface-card border border-surface-border px-2 py-0.5 rounded">
-            {val}
+            {toTitleCase(val)}
           </span>
         )
       },
@@ -547,7 +755,7 @@ export default function Monitoring() {
                     <div className="space-y-2">
                       {evalResult.signals.map((sig, idx) => (
                         <div key={`${sig.strategy}-${idx}`} className="text-xs text-gray-300 mono">
-                          <span className="text-brand font-bold mr-2">[{sig.strategy}]</span>
+                          <span className="text-brand font-bold mr-2">[{STRATEGY_KEY_TO_LABEL[sig.strategy_key || ''] ?? sig.strategy}]</span>
                           {sig.notes}
                         </div>
                       ))}
@@ -626,7 +834,7 @@ export default function Monitoring() {
                 {table.getRowModel().rows.map((row: any) => (
                   <tr key={row.id} className="border-b border-surface-border/30 hover:bg-white/[0.02] transition-colors group">
                     {row.getVisibleCells().map((cell: any) => (
-                      <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap">
+                      <td key={cell.id} className="py-2.5 px-5 whitespace-nowrap align-middle">
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
                     ))}

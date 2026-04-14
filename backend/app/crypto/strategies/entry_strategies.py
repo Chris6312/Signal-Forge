@@ -70,8 +70,6 @@ def _build_signal_snapshot(strategy_name: str, strategy_key: str, symbol: str, o
     trigger_type = "continuation"
     if strategy_key == "pullback_reclaim":
         trigger_type = "reclaim"
-    elif strategy_key == "failed_breakdown_reclaim":
-        trigger_type = "failed_breakdown_reclaim"
     elif strategy_key == "mean_reversion_bounce":
         trigger_type = "mean_reversion"
     elif strategy_key == "range_rotation":
@@ -261,7 +259,6 @@ class EntrySignal:
             "Mean Reversion Bounce": "mean_reversion_bounce",
             "Range Rotation Reversal": "range_rotation",
             "Breakout Retest Hold": "breakout_retest",
-            "Failed Breakdown Reclaim": "failed_breakdown_reclaim",
         }
         return mapping.get(self.strategy, _normalize_strategy_key(self.strategy) or self.strategy)
 
@@ -294,10 +291,6 @@ def _strategy_specific_bonus(strategy_key: str, signal: EntrySignal) -> float:
         if reasoning.get("price_in_retest_band"):
             bonus += 0.10
         if reasoning.get("breakout_acceptance_confirmed"):
-            bonus += 0.08
-
-    elif strategy_key == "failed_breakdown_reclaim":
-        if reasoning.get("reclaim_confirmed"):
             bonus += 0.08
 
     elif strategy_key == "mean_reversion_bounce":
@@ -698,60 +691,12 @@ class BreakoutRetestHold:
             },
         )
 
-
-class FailedBreakdownReclaim:
-    name = "Failed Breakdown Reclaim"
-    primary_tf = "1H"
-
-    def evaluate(self, symbol, ohlcv):
-        ohlcv = _closed_ohlcv(ohlcv, 60)
-        if len(ohlcv) < 20:
-            return None
-        closes = [float(c[4]) for c in ohlcv]
-        lows = [float(c[3]) for c in ohlcv]
-        highs = [float(c[2]) for c in ohlcv]
-        current = closes[-1]
-        atr = _atr(ohlcv)
-        regime = _detect_regime(ohlcv)
-        support = min(lows[-20:-5])
-        recent_min = min(lows[-5:-1])
-        if recent_min >= support:
-            return None
-        prior_close = closes[-2]
-        if not (prior_close <= support and current > support and current > highs[-2]):
-            return None
-        stop = recent_min - atr * 0.3
-        tp1 = current + atr * 2.0
-        tp2 = current + atr * 3.5
-        return EntrySignal(
-            strategy=self.name,
-            symbol=symbol,
-            entry_price=current,
-            initial_stop=stop,
-            profit_target_1=tp1,
-            profit_target_2=tp2,
-            regime=regime,
-            confidence=0.67,
-            max_hold_hours=24,
-            notes=f"Failed breakdown below {support:.4f} reclaimed with close back above support",
-            reasoning={
-                "timeframe": self.primary_tf,
-                "atr": round(atr, 6),
-                "support_level": round(support, 6),
-                "breakdown_low": round(recent_min, 6),
-                "prior_close": round(prior_close, 6),
-                "reclaim_confirmed": True,
-            },
-        )
-
-
 ENTRY_STRATEGIES = [
     MomentumBreakoutContinuation(),
     PullbackReclaim(),
     MeanReversionBounce(),
     RangeRotationReversal(),
     BreakoutRetestHold(),
-    FailedBreakdownReclaim(),
 ]
 
 # Scoring thresholds
@@ -778,9 +723,7 @@ def _apply_pullback_reclaim_score_guardrails(score: float, feature_scores: dict)
 
 
 def _strategy_name_to_key(name: str) -> str | None:
-    if "Pullback Reclaim" in name or "Failed Breakdown Reclaim" in name:
-        if "Failed Breakdown Reclaim" in name:
-            return "failed_breakdown_reclaim"
+    if "Pullback Reclaim" in name:
         return "pullback_reclaim"
 
     if "Momentum Breakout Continuation" in name:
@@ -864,7 +807,6 @@ def evaluate_all(symbol, candles_by_tf, include_diagnostics: bool = False):
 
     key_map = {
         "pullback_reclaim": ["Pullback Reclaim"],
-        "failed_breakdown_reclaim": ["Failed Breakdown Reclaim"],
         "trend_continuation": ["Momentum Breakout Continuation"],
         "mean_reversion_bounce": ["Mean Reversion Bounce"],
 
