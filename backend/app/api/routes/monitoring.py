@@ -1,7 +1,8 @@
 import asyncio
+import inspect
 import logging
-from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
@@ -9,22 +10,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db_session
 from app.api.schemas.monitoring import EvaluateSymbolOut, MonitoringListOut
+from app.common.candle_store import TF_MINUTES
 from app.common.models.position import Position, PositionState
 from app.common.models.watchlist import SymbolState, WatchlistSymbol
-from app.common.candle_store import CandleStore, TF_MINUTES
 from app.common.redis_client import get_redis
 from app.common.symbols import canonical_symbol
 from app.common.watchlist_activation import activation_ready_at, is_watchlist_activation_ready
 from app.regime import regime_engine
 from app.stocks.candle_fetcher import StockCandleFetcher
-from app.stocks.monitoring import _needs_insufficient_candle_recovery, _stock_candles_by_tf
+from app.stocks.monitoring import STOCK_CANDLE_STORE, STOCK_CANDLE_FETCHER, _stock_candles_by_tf
+from app.stocks.candle_fetcher import request_refresh as request_stock_refresh
+from app.crypto.candle_fetcher import CryptoCandleFetcher
+from app.crypto.monitoring import CRYPTO_CANDLE_STORE, CRYPTO_CANDLE_FETCHER, _crypto_candles_by_tf
+from app.crypto.candle_fetcher import request_refresh as request_crypto_refresh
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 _EVAL_CACHE: dict[tuple[str, ...], dict] = {}
-_STOCK_CANDLE_STORE = CandleStore()
-_STOCK_FETCHER = StockCandleFetcher(_STOCK_CANDLE_STORE)
-_STOCK_EVAL_MIN_CANDLES = 20
+_STOCK_CANDLE_STORE = STOCK_CANDLE_STORE
+_CRYPTO_CANDLE_STORE = CRYPTO_CANDLE_STORE
+_STOCK_FETCHER = STOCK_CANDLE_FETCHER
+_CRYPTO_FETCHER = CRYPTO_CANDLE_FETCHER
 
 
 def _strategy_key(value: str | None) -> str | None:
@@ -35,6 +41,91 @@ def _strategy_key(value: str | None) -> str | None:
 
 def _signal_key(signal) -> str | None:
     return _strategy_key(getattr(signal, "strategy_key", None) or getattr(signal, "strategy", None))
+
+
+def _eval_timeseries_key(candles_by_tf: dict[str, list], ordered_frames: Sequence[str]) -> tuple[float, ...]:
+    key = []
+    for frame in ordered_frames:
+        candles = candles_by_tf.get(frame) or []
+        interval_minutes = 5 if frame == "5m" else 15 if frame == "15m" else 60 if frame == "1H" else 240 if frame == "4H" else 1440
+        key.append(_latest_closed_ts(candles, interval_minutes))
+    return tuple(key)
+
+
+def _empty_evaluation(reason: str) -> dict:
+    return {
+        "signals": [],
+        "top_strategy": None,
+        "top_confidence": None,
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {reason: reason},
+        "feature_scores": {},
+        "timestamp_evaluated": None,
+        "reason": reason,
+    }
+
+
+def _has_required_candles(candles_by_tf: dict[str, list], required_frames: Sequence[str]) -> bool:
+    return all(bool(candles_by_tf.get(frame)) for frame in required_frames)
+
+
+def _required_frames(asset_class: str) -> tuple[str, ...]:
+    return ("15m", "1H", "4H", "daily") if asset_class == "crypto" else ("5m", "15m", "daily")
+
+
+def _refresh_request(symbol: str, asset_class: str, frames: Sequence[str]) -> None:
+    for frame in frames:
+        if asset_class == "crypto":
+            request_crypto_refresh(symbol, frame)
+        else:
+            request_stock_refresh(symbol, frame)
+
+
+def _pending_eval_payload(asset_class: str, symbol: str, candles_by_tf: dict[str, list], store) -> dict:
+    frames = _required_frames(asset_class)
+    can = canonical_symbol(symbol, asset_class=asset_class)
+    stale_or_missing = []
+    for frame in frames:
+        interval = TF_MINUTES[frame]
+        if not candles_by_tf.get(frame) or store.needs_refresh(can if asset_class == "crypto" else symbol, interval):
+            stale_or_missing.append(frame)
+
+    if stale_or_missing:
+        _refresh_request(symbol, asset_class, stale_or_missing)
+
+    return {
+        "top_signal": None,
+        "diagnostics": {
+            "signals": [],
+            "top_strategy": "pending",
+            "top_confidence": None,
+            "evaluated_strategy_scores": {},
+            "evaluated_strategies": {},
+            "rejected_strategies": {},
+            "feature_scores": {},
+            "timestamp_evaluated": None,
+            "lifecycle_state": "PENDING",
+            "decision_state": "WAITING_FOR_DATA",
+            "decision_reason": "pending_candle_refresh",
+        },
+        "evaluation": {
+            "strategies": [],
+            "top_strategy": "pending",
+            "confidence": None,
+            "lifecycle_state": "PENDING",
+            "decision_state": "WAITING_FOR_DATA",
+            "decision_reason": "pending_candle_refresh",
+        },
+        "pending_refresh": stale_or_missing,
+    }
+
+
+def _is_pending_eval(payload: dict | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    diagnostics = payload.get("diagnostics")
+    return isinstance(diagnostics, dict) and diagnostics.get("decision_state") == "WAITING_FOR_DATA"
 
 
 def _latest_closed_ts(candles, interval_minutes: int) -> float:
@@ -64,20 +155,32 @@ def _latest_closed_ts(candles, interval_minutes: int) -> float:
     return 0.0
 
 
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 async def _stock_eval_candles(symbol: str) -> dict[str, list]:
-    if any(_STOCK_CANDLE_STORE.frame_info(symbol, TF_MINUTES[tf]).get("count", 0) < _STOCK_EVAL_MIN_CANDLES for tf in ("5m", "15m", "daily")):
-        await _STOCK_FETCHER.backfill(symbol)
-    await _STOCK_FETCHER.refresh_if_needed(symbol)
     return _stock_candles_by_tf(_STOCK_CANDLE_STORE, symbol)
 
 
-def _stock_eval_cache_key(symbol: str) -> tuple[str, str, float, float, float]:
+def _stock_eval_cache_key(symbol: str, candles_by_tf: dict[str, list] | None = None) -> tuple[str, str, float, float, float, float]:
+    candles_by_tf = candles_by_tf or _stock_candles_by_tf(_STOCK_CANDLE_STORE, symbol)
     return (
         "stock",
         symbol,
-        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["5m"]),
-        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["15m"]),
-        _STOCK_CANDLE_STORE.latest_close_ts(symbol, TF_MINUTES["daily"]),
+        *_eval_timeseries_key(candles_by_tf, ("1m", "5m", "15m", "daily")),
+    )
+
+
+def _crypto_eval_cache_key(symbol: str, candles_by_tf: dict[str, list] | None = None) -> tuple[str, str, float, float, float, float]:
+    candles_by_tf = candles_by_tf or _crypto_candles_by_tf(_CRYPTO_CANDLE_STORE, symbol)
+    can = canonical_symbol(symbol, asset_class="crypto")
+    return (
+        "crypto",
+        can,
+        *_eval_timeseries_key(candles_by_tf, ("15m", "1H", "4H", "daily")),
     )
 
 
@@ -147,6 +250,42 @@ def _serialize_signal(signal) -> dict:
     }
 
 
+def _build_evaluation_payload(normalized: dict, top_signal) -> dict:
+    return {
+        "strategies": [_serialize_signal(signal) for signal in normalized.get("signals") or []],
+        "top_strategy": normalized.get("top_strategy"),
+        "confidence": normalized.get("top_confidence") if normalized.get("top_confidence") is not None else (getattr(top_signal, "confidence", 0) if top_signal else 0),
+    }
+
+
+def _needs_retry_after_eval(normalized: dict) -> bool:
+    if normalized.get("signals"):
+        return False
+
+    rejected = normalized.get("rejected_strategies") or {}
+    if not isinstance(rejected, dict) or not rejected:
+        return not bool(normalized.get("evaluated_strategy_scores"))
+
+    reasons = [str(reason) for reason in rejected.values() if reason]
+    return not bool(reasons) or all(reason == "insufficient_candles" for reason in reasons)
+
+
+async def _evaluate_with_backfill(asset_class: str, symbol: str, candles_by_tf: dict[str, list], evaluate_all, fetcher, store):
+    raw_result = await _maybe_await(evaluate_all(symbol, candles_by_tf, include_diagnostics=True))
+    normalized = _normalize_eval_result(raw_result)
+
+    if _needs_retry_after_eval(normalized):
+        try:
+            await fetcher.backfill(symbol)
+        except Exception as exc:
+            logger.warning("Backfill retry failed for %s (%s): %s", symbol, asset_class, exc)
+        candles_by_tf = _crypto_candles_by_tf(store, symbol) if asset_class == "crypto" else _stock_candles_by_tf(store, symbol)
+        raw_result = await _maybe_await(evaluate_all(symbol, candles_by_tf, include_diagnostics=True))
+        normalized = _normalize_eval_result(raw_result)
+
+    return normalized, candles_by_tf
+
+
 @router.get("", response_model=MonitoringListOut)
 async def get_monitoring_candidates(
     asset_class: str | None = Query(None),
@@ -161,67 +300,34 @@ async def get_monitoring_candidates(
     async def _top_signal(ws: WatchlistSymbol):
         try:
             cache_key = None
+            lookup_symbol = canonical_symbol(ws.symbol, asset_class=ws.asset_class) if ws.asset_class == "crypto" else ws.symbol.upper()
             if ws.asset_class == "crypto":
-                from app.crypto.kraken_client import kraken_client
                 from app.crypto.strategies.entry_strategies import evaluate_all
 
-                can = canonical_symbol(ws.symbol, asset_class=ws.asset_class)
-                ohlcv_15m, ohlcv_1h, ohlcv_4h, ohlcv_daily = await asyncio.gather(
-                    kraken_client.get_ohlcv(can, interval=15),
-                    kraken_client.get_ohlcv(can, interval=60),
-                    kraken_client.get_ohlcv(can, interval=240),
-                    kraken_client.get_ohlcv(can, interval=1440),
-                )
-                trigger_ts = _latest_closed_ts(ohlcv_15m, 15)
-                cache_key = (ws.asset_class, can, trigger_ts)
-                if trigger_ts and cache_key in _EVAL_CACHE:
+                can = lookup_symbol
+                candles_by_tf = _crypto_candles_by_tf(_CRYPTO_CANDLE_STORE, can)
+                cache_key = _crypto_eval_cache_key(can, candles_by_tf)
+                if cache_key in _EVAL_CACHE:
                     return _EVAL_CACHE[cache_key]
-                raw_result = evaluate_all(
-                    can,
-                    {
-                        "15m": ohlcv_15m,
-                        "1H": ohlcv_1h,
-                        "4H": ohlcv_4h,
-                        "daily": ohlcv_daily,
-                    },
-                    include_diagnostics=True,
-                )
+                normalized, candles_by_tf = await _evaluate_with_backfill("crypto", can, candles_by_tf, evaluate_all, _CRYPTO_FETCHER, _CRYPTO_CANDLE_STORE)
             elif ws.asset_class == "stock":
                 from app.stocks.strategies.entry_strategies import evaluate_all
 
                 candles_by_tf = await _stock_eval_candles(ws.symbol)
-                cache_key = _stock_eval_cache_key(ws.symbol)
-                if all(ts > 0 for ts in cache_key[2:]) and cache_key in _EVAL_CACHE:
+                cache_key = _stock_eval_cache_key(ws.symbol, candles_by_tf)
+                if cache_key in _EVAL_CACHE:
                     return _EVAL_CACHE[cache_key]
-                raw_result = evaluate_all(
-                    ws.symbol,
-                    candles_by_tf,
-                    include_diagnostics=True,
-                )
-                if _needs_insufficient_candle_recovery(raw_result):
-                    logger.info("Insufficient candles for %s — targeted backfill and one re-evaluation", ws.symbol)
-                    try:
-                        await _STOCK_FETCHER.backfill(ws.symbol)
-                        raw_result = evaluate_all(ws.symbol, _stock_candles_by_tf(_STOCK_CANDLE_STORE, ws.symbol), include_diagnostics=True)
-                    except Exception as exc:
-                        logger.warning("Targeted backfill recovery failed for %s: %s", ws.symbol, exc)
+                normalized, candles_by_tf = await _evaluate_with_backfill("stock", ws.symbol, candles_by_tf, evaluate_all, _STOCK_FETCHER, _STOCK_CANDLE_STORE)
             else:
-                raw_result = []
+                normalized = _normalize_eval_result([])
 
-            normalized = _normalize_eval_result(raw_result)
-            signals = normalized["signals"]
-            top_signal = _select_top_signal(signals, normalized["top_strategy"])
-            evaluation = {
-                "strategies": [_serialize_signal(signal) for signal in signals],
-                "top_strategy": normalized["top_strategy"],
-                "confidence": normalized["top_confidence"] if normalized["top_confidence"] is not None else (top_signal.confidence if top_signal else 0),
-            }
+            top_signal = _select_top_signal(normalized["signals"], normalized["top_strategy"])
             payload = {
                 "top_signal": top_signal,
                 "diagnostics": normalized,
-                "evaluation": evaluation,
+                "evaluation": _build_evaluation_payload(normalized, top_signal),
             }
-            if cache_key and all(ts > 0 for ts in cache_key[2:]):
+            if cache_key is not None:
                 _EVAL_CACHE[cache_key] = payload
             return payload
         except Exception as exc:
@@ -255,6 +361,8 @@ async def get_monitoring_candidates(
             evaluation = sig.get("evaluation") if isinstance(sig, dict) else None
             backend_top_strategy = diagnostics.get("top_strategy") if isinstance(diagnostics, dict) else None
             backend_top_confidence = diagnostics.get("top_confidence") if isinstance(diagnostics, dict) else None
+            if isinstance(diagnostics, dict) and diagnostics.get("reason") == "insufficient_candles":
+                evaluation_error = "insufficient_candles"
             if diagnostics and isinstance(diagnostics, dict):
                 sig_obj = _select_top_signal(diagnostics.get("signals") or [], backend_top_strategy) or sig_obj
 
@@ -348,35 +456,19 @@ async def evaluate_symbol(symbol: str, asset_class: str = Query("crypto")):
 
     try:
         if asset_class == "crypto":
-            from app.crypto.kraken_client import kraken_client
             from app.crypto.strategies.entry_strategies import evaluate_all
 
-            ohlcv_15m, ohlcv_1h, ohlcv_4h, ohlcv_daily = await asyncio.gather(
-                kraken_client.get_ohlcv(can, interval=15),
-                kraken_client.get_ohlcv(can, interval=60),
-                kraken_client.get_ohlcv(can, interval=240),
-                kraken_client.get_ohlcv(can, interval=1440),
-            )
-            raw_result = evaluate_all(
-                can,
-                {
-                    "15m": ohlcv_15m,
-                    "1H": ohlcv_1h,
-                    "4H": ohlcv_4h,
-                    "daily": ohlcv_daily,
-                },
-                include_diagnostics=True,
-            )
+            candles_by_tf = _crypto_candles_by_tf(_CRYPTO_CANDLE_STORE, can)
+            normalized, candles_by_tf = await _evaluate_with_backfill("crypto", can, candles_by_tf, evaluate_all, _CRYPTO_FETCHER, _CRYPTO_CANDLE_STORE)
         elif asset_class == "stock":
             from app.stocks.strategies.entry_strategies import evaluate_all
 
             upper_symbol = symbol.upper()
             candles_by_tf = await _stock_eval_candles(upper_symbol)
-            raw_result = evaluate_all(upper_symbol, candles_by_tf, include_diagnostics=True)
+            normalized, candles_by_tf = await _evaluate_with_backfill("stock", upper_symbol, candles_by_tf, evaluate_all, _STOCK_FETCHER, _STOCK_CANDLE_STORE)
         else:
-            raw_result = []
+            normalized = _normalize_eval_result([])
 
-        normalized = _normalize_eval_result(raw_result)
         result["signals"] = [_serialize_signal(signal) for signal in normalized["signals"]]
         result["top_strategy"] = normalized["top_strategy"]
         result["top_confidence"] = normalized["top_confidence"]

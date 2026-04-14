@@ -5,25 +5,24 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 
+from app.common.audit_logger import log_event
+from app.common.candle_store import CandleStore, TF_MINUTES
 from app.common.config import settings
 from app.common.database import AsyncSessionLocal
-from app.common.models.watchlist import WatchlistSymbol, SymbolState
-from app.common.models.position import Position, PositionState
-from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
-from app.common.audit_logger import log_event
+from app.common.market_hours import can_enter_trade, can_pull_data, market_status
 from app.common.models.audit import AuditSource
-from app.common.runtime_state import runtime_state
-from app.common.ws_manager import ws_manager
+from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
+from app.common.models.position import Position, PositionState
+from app.common.models.watchlist import WatchlistSymbol, SymbolState
+from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 from app.common.redis_client import get_redis
-from app.stocks.tradier_client import tradier_client
-from app.stocks.strategies.entry_strategies import evaluate_all
-from app.common.market_hours import can_enter_trade, market_status
+from app.common.runtime_state import runtime_state
+from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
+from app.common.ws_manager import ws_manager
 from app.regime import regime_engine
 from app.regime.indicators import build_asset_indicators, build_vix_indicators
-from app.common.candle_store import CandleStore, TF_MINUTES
-from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
 from app.stocks.candle_fetcher import StockCandleFetcher
-from app.stocks.strategies.entry_strategies import _execution_readiness_adjustment
+from app.stocks.strategies.entry_strategies import evaluate_all, _execution_readiness_adjustment
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,9 @@ ASSET_CLASS = "stock"
 COOLDOWN_KEY_PREFIX = "cooldown:stock:"
 INTENT_KEY_PREFIX = "intent:stock:"
 INTENT_LOCK_TTL_SECONDS = 60
+STOCK_CANDLE_STORE = CandleStore()
+STOCK_CANDLE_FETCHER = StockCandleFetcher(STOCK_CANDLE_STORE)
+
 STOCK_EXIT_STRATEGY_BY_KEY = {
     "opening_range_breakout": "End-of-Day Exit",
     "pullback_reclaim": "Fixed Risk then Break-Even Promotion",
@@ -63,6 +65,34 @@ def _readiness_metrics(signal) -> dict:
     return dict(getattr(signal, "reasoning", {}) or {})
 
 
+def _stock_candles_by_tf(store: CandleStore, symbol: str) -> dict[str, list]:
+    return {
+        "1m": store.get(symbol, TF_MINUTES["1m"]),
+        "5m": store.get(symbol, TF_MINUTES["5m"]),
+        "15m": store.get(symbol, TF_MINUTES["15m"]),
+        "daily": store.get(symbol, TF_MINUTES["daily"]),
+    }
+
+
+def _needs_insufficient_candle_recovery(result) -> bool:
+    if not isinstance(result, dict):
+        return False
+
+    if result.get("signals"):
+        return False
+
+    rejected = result.get("rejected_strategies") or {}
+    if not isinstance(rejected, dict) or not rejected:
+        return False
+
+    reasons = [str(reason) for reason in rejected.values() if reason]
+    if not reasons:
+        return False
+
+    insufficient = sum(1 for reason in reasons if reason == "insufficient_candles")
+    return insufficient >= max(1, len(reasons) // 2 + len(reasons) % 2)
+
+
 def _select_top_signal(result):
     signals = _extract_signals(result)
     if not signals:
@@ -80,9 +110,10 @@ def _select_top_signal(result):
 
 class StockMonitor:
     def __init__(self):
-        self._store = CandleStore()
-        self._fetcher = StockCandleFetcher(self._store)
+        self._store = STOCK_CANDLE_STORE
+        self._fetcher = STOCK_CANDLE_FETCHER
         self._last_trigger_eval_close_ts: dict[str, float] = {}
+        self._startup_backfill_pending = True
 
     async def run(self):
         await runtime_state.update_worker_status("stock_monitor", "running")
@@ -90,14 +121,50 @@ class StockMonitor:
 
         while True:
             try:
+                if self._startup_backfill_pending and can_pull_data():
+                    await self._warm_start_backfill()
                 await self._cycle()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Stock monitor error: %s", exc)
+
             await asyncio.sleep(settings.STOCK_MONITOR_INTERVAL)
 
         await runtime_state.update_worker_status("stock_monitor", "stopped")
+
+    async def _warm_start_backfill(self):
+        logger.info("Stock startup backfill starting")
+        async with AsyncSessionLocal() as db:
+            stmt = select(WatchlistSymbol).where(
+                WatchlistSymbol.asset_class == ASSET_CLASS,
+                WatchlistSymbol.state == SymbolState.ACTIVE,
+            )
+            result = await db.execute(stmt)
+            symbols = result.scalars().all()
+
+        if not symbols:
+            self._startup_backfill_pending = False
+            return
+
+        for ws in symbols:
+            if not all(
+                self._store.is_loaded(ws.symbol, iv)
+                for iv in (TF_MINUTES["1m"], TF_MINUTES["5m"], TF_MINUTES["15m"], TF_MINUTES["daily"])
+            ):
+                await self._fetcher.backfill(ws.symbol)
+
+        self._startup_backfill_pending = not all(
+            all(
+                self._store.is_loaded(ws.symbol, iv)
+                for iv in (TF_MINUTES["1m"], TF_MINUTES["5m"], TF_MINUTES["15m"], TF_MINUTES["daily"])
+            )
+            for ws in symbols
+        )
+        logger.info(
+            "Stock startup backfill complete%s",
+            "" if not self._startup_backfill_pending else " (more data still pending)",
+        )
 
     async def _cycle(self):
         if not await runtime_state.is_trading_enabled(ASSET_CLASS):
@@ -118,17 +185,6 @@ class StockMonitor:
             result = await db.execute(stmt)
             symbols = result.scalars().all()
 
-            # Backfill any symbol not yet loaded into the candle store
-            for ws in symbols:
-                if not self._store.is_loaded(ws.symbol, TF_MINUTES["5m"]):
-                    logger.info("Backfilling candles for %s", ws.symbol)
-                    await self._fetcher.backfill(ws.symbol)
-
-            # Refresh timeframes whose candle has just closed (20 s gate)
-            for ws in symbols:
-                await self._fetcher.refresh_if_needed(ws.symbol)
-
-            # Evaluate during premarket and regular session; execution is still gated later.
             if status not in ("pre_market", "open"):
                 return
 
@@ -141,17 +197,7 @@ class StockMonitor:
             await db.commit()
 
     async def _refresh_regime(self):
-        try:
-            spy_history = await tradier_client.get_history("SPY", interval="daily")
-            vix_history = await tradier_client.get_history("VIX", interval="daily")
-            if len(spy_history) >= 55 and len(vix_history) >= 10:
-                spy_closes = [float(d["close"]) for d in spy_history]
-                vix_closes = [float(d["close"]) for d in vix_history]
-                spy_ind = build_asset_indicators(spy_closes)
-                vix_ind = build_vix_indicators(vix_closes)
-                regime_engine.update_stocks(spy_ind, vix_ind)
-        except Exception as exc:
-            logger.warning("Regime refresh failed: %s", exc)
+        logger.debug("Stock regime refresh skipped; candle workers own OHLCV ingestion")
 
     def _trigger_close_ts(self, symbol: str) -> float:
         return self._store.latest_close_ts(symbol, TF_MINUTES["5m"])
@@ -176,7 +222,11 @@ class StockMonitor:
         if not self._should_evaluate_trigger(ws.symbol):
             return
 
-        if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["5m"], frame_info=fast_frame_info):
+        if not is_watchlist_activation_ready(
+            ws.added_at,
+            fast_tf_minutes=TF_MINUTES["5m"],
+            frame_info=fast_frame_info,
+        ):
             logger.debug(
                 "%s added at %s is waiting for next 5m activation candle (ready at %s)",
                 ws.symbol,
@@ -195,17 +245,16 @@ class StockMonitor:
 
         self._mark_trigger_evaluated(ws.symbol)
 
-        candles_by_tf = {
-            "1m":    self._store.get(ws.symbol, TF_MINUTES["1m"]),
-            "5m":    self._store.get(ws.symbol, TF_MINUTES["5m"]),
-            "15m":   self._store.get(ws.symbol, TF_MINUTES["15m"]),
-            "daily": self._store.get(ws.symbol, TF_MINUTES["daily"]),
-        }
+        candles_by_tf = _stock_candles_by_tf(self._store, ws.symbol)
 
-        # Debug: log candle frame metadata to explain empty-signal cases
         try:
             tf_info = {}
-            for tf, iv in (("1m", TF_MINUTES["1m"]), ("5m", TF_MINUTES["5m"]), ("15m", TF_MINUTES["15m"]), ("daily", TF_MINUTES["daily"])):
+            for tf, iv in (
+                ("1m", TF_MINUTES["1m"]),
+                ("5m", TF_MINUTES["5m"]),
+                ("15m", TF_MINUTES["15m"]),
+                ("daily", TF_MINUTES["daily"]),
+            ):
                 try:
                     tf_info[tf] = self._store.frame_info(ws.symbol, iv)
                 except Exception as e:
@@ -231,6 +280,7 @@ class StockMonitor:
             readiness,
             _readiness_metrics(best),
         )
+
         if hasattr(best, "reasoning"):
             best.reasoning = dict(getattr(best, "reasoning", {}) or {})
             best.reasoning["execution_ready"] = readiness["execution_ready"]
@@ -238,23 +288,38 @@ class StockMonitor:
             best.reasoning["execution_block_reason"] = readiness["block_reason"]
 
         if not readiness["execution_ready"]:
-            logger.info("Entry blocked by execution readiness for %s: %s", ws.symbol, readiness["block_reason"])
+            logger.info(
+                "Entry blocked by execution readiness for %s: %s",
+                ws.symbol,
+                readiness["block_reason"],
+            )
             return
 
         if readiness["confidence_cap"] < best.confidence:
             best.confidence = readiness["confidence_cap"]
 
-        logger.info("Stock entry signal: %s via %s (confidence=%.2f)", ws.symbol, best.strategy, best.confidence)
+        logger.info(
+            "Stock entry signal: %s via %s (confidence=%.2f)",
+            ws.symbol,
+            best.strategy,
+            best.confidence,
+        )
 
         current_count = await self._count_open_positions(db)
-        # Respect runtime overrides for max positions when evaluating regime limits
         try:
             max_override = await runtime_state.get_value("max_stock_positions")
             if isinstance(max_override, str):
                 max_override = int(max_override)
         except Exception:
             max_override = None
-        allowed, reason = regime_engine.can_open(ASSET_CLASS, best.strategy, best.confidence, current_count, max_positions_override=max_override)
+
+        allowed, reason = regime_engine.can_open(
+            ASSET_CLASS,
+            best.strategy,
+            best.confidence,
+            current_count,
+            max_positions_override=max_override,
+        )
         if not allowed:
             logger.info("Entry blocked by regime [%s]: %s", regime_engine.stock_regime, reason)
             return
@@ -287,7 +352,6 @@ class StockMonitor:
 
     async def _create_position(self, db, ws: WatchlistSymbol, signal):
         from app.common.paper_ledger import size_paper_position, record_paper_fill
-        from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 
         trading_mode = await runtime_state.get_trading_mode()
         risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
@@ -296,7 +360,12 @@ class StockMonitor:
         quantity = 0.0
         if is_paper:
             quantity = await size_paper_position(
-                db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
+                db,
+                ASSET_CLASS,
+                signal.entry_price,
+                signal.initial_stop,
+                risk_pct,
+                signal=signal,
             )
 
         if quantity <= 0:
@@ -368,7 +437,13 @@ class StockMonitor:
 
         if is_paper and quantity > 0:
             await record_paper_fill(
-                db, ASSET_CLASS, ws.symbol, position.id, order.id, quantity, signal.entry_price
+                db,
+                ASSET_CLASS,
+                ws.symbol,
+                position.id,
+                order.id,
+                quantity,
+                signal.entry_price,
             )
 
         await log_event(
@@ -404,6 +479,8 @@ class StockMonitor:
             },
         )
 
+        return position
+
     def _select_exit_strategy(self, signal) -> str:
         strategy_key = _signal_key(signal)
         if strategy_key in STOCK_EXIT_STRATEGY_BY_KEY:
@@ -417,11 +494,15 @@ class StockMonitor:
         return "Fixed Risk then Break-Even Promotion"
 
     async def _has_open_position(self, db, symbol: str) -> bool:
-        stmt = select(Position.id).where(
-            Position.symbol == symbol,
-            Position.asset_class == ASSET_CLASS,
-            Position.state == PositionState.OPEN,
-        ).limit(1)
+        stmt = (
+            select(Position.id)
+            .where(
+                Position.symbol == symbol,
+                Position.asset_class == ASSET_CLASS,
+                Position.state == PositionState.OPEN,
+            )
+            .limit(1)
+        )
         result = await db.execute(stmt)
         return result.first() is not None
 

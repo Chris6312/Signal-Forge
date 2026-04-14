@@ -21,6 +21,8 @@ from app.common.candle_store import CandleStore, TF_MINUTES
 
 logger = logging.getLogger(__name__)
 
+_PENDING_REFRESH_REQUESTS: dict[tuple[str, str], float] = {}
+
 _ET = ZoneInfo("America/New_York")
 
 # Calendar days to look back when backfilling each intraday timeframe.
@@ -64,6 +66,11 @@ def _ts_start(calendar_days: int) -> str:
     """ISO datetime string N calendar days before now (ET), for timesales start."""
     d = datetime.now(_ET) - timedelta(days=calendar_days)
     return d.strftime("%Y-%m-%d %H:%M")
+
+
+def _session_start() -> str:
+    now_et = datetime.now(_ET)
+    return now_et.replace(hour=8, minute=40, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
 
 
 def _normalize_timesales(raw: list) -> list[dict]:
@@ -110,31 +117,65 @@ class StockCandleFetcher:
 
     def __init__(self, store: CandleStore):
         self.store = store
+        self._active_fetches: dict[tuple[str, str], asyncio.Lock] = {}
+        self._last_fetch_close_ts: dict[tuple[str, str], float] = {}
+
+    def _current_close_ts(self, interval_minutes: int) -> float:
+        now_ts = datetime.now(timezone.utc).timestamp()
+        iv_sec = interval_minutes * 60
+        return (now_ts // iv_sec) * iv_sec
+
+    async def _fetch_once(self, symbol: str, tf: str) -> list[dict]:
+        key = (symbol, tf)
+        interval_minutes = TF_MINUTES[tf]
+        current_close_ts = self._current_close_ts(interval_minutes)
+
+        if self._last_fetch_close_ts.get(key, 0.0) >= current_close_ts:
+            return []
+
+        lock = self._active_fetches.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            return []
+
+        async with lock:
+            if self._last_fetch_close_ts.get(key, 0.0) >= current_close_ts:
+                return []
+
+            candles = await self._fetch(symbol, tf)
+            if candles:
+                await self.store.update(symbol, interval_minutes, candles)
+            self._last_fetch_close_ts[key] = current_close_ts
+            return candles
 
     async def backfill(self, symbol: str) -> None:
         """Fetch enough history on every timeframe.  Called once per symbol during pre-market."""
-        for tf in self.TIMEFRAMES:
-            try:
-                candles = await self._fetch(symbol, tf)
-                if candles:
-                    await self.store.update(symbol, TF_MINUTES[tf], candles)
-                    logger.info("Backfill %s @%s: %d bars", symbol, tf, len(candles))
-                await asyncio.sleep(self._RATE_PAUSE)
-            except Exception as exc:
-                logger.warning("Backfill failed %s @%s: %s", symbol, tf, exc)
+        self._backfill_mode = True
+        try:
+            for tf in self.TIMEFRAMES:
+                try:
+                    candles = await self._fetch_once(symbol, tf)
+                    if candles:
+                        logger.info("Backfill %s @%s: %d bars", symbol, tf, len(candles))
+                    await asyncio.sleep(self._RATE_PAUSE)
+                except Exception as exc:
+                    logger.warning("Backfill failed %s @%s: %s", symbol, tf, exc)
+        finally:
+            self._backfill_mode = False
 
     async def refresh_if_needed(self, symbol: str) -> list[str]:
         """Refresh timeframes whose candle has just closed (20 s gate).  Returns refreshed TF list."""
         refreshed = []
-        for tf in self.TIMEFRAMES:
+        prioritized = [tf for tf in self.TIMEFRAMES if _has_pending_refresh(symbol, tf)]
+        ordered = prioritized + [tf for tf in self.TIMEFRAMES if tf not in prioritized]
+        for tf in ordered:
             iv = TF_MINUTES[tf]
             if not self.store.needs_refresh(symbol, iv):
                 continue
             try:
-                candles = await self._fetch(symbol, tf)
+                candles = await self._fetch_once(symbol, tf)
                 if candles:
-                    await self.store.update(symbol, iv, candles)
                     refreshed.append(tf)
+                    _clear_pending_refresh(symbol, tf)
                 await asyncio.sleep(self._RATE_PAUSE)
             except Exception as exc:
                 logger.warning("Refresh failed %s @%s: %s", symbol, tf, exc)
@@ -150,7 +191,19 @@ class StockCandleFetcher:
         raw = await tradier_client.get_timesales(
             symbol,
             interval=ts_interval,
-            start=_ts_start(_TF_LOOKBACK_DAYS[tf]),
+            start=_session_start() if getattr(self, "_backfill_mode", False) else _ts_start(_TF_LOOKBACK_DAYS[tf]),
         )
         candles = _normalize_timesales(raw)
         return _drop_incomplete_timesales(candles, TF_MINUTES[tf])
+
+
+def request_refresh(symbol: str, timeframe: str) -> None:
+    _PENDING_REFRESH_REQUESTS[(symbol, timeframe)] = datetime.now(timezone.utc).timestamp()
+
+
+def _has_pending_refresh(symbol: str, timeframe: str) -> bool:
+    return (symbol, timeframe) in _PENDING_REFRESH_REQUESTS
+
+
+def _clear_pending_refresh(symbol: str, timeframe: str) -> None:
+    _PENDING_REFRESH_REQUESTS.pop((symbol, timeframe), None)

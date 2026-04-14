@@ -237,3 +237,38 @@ async def test_stock_monitor_continues_normal_flow_without_overlap(monkeypatch):
     assert create_position.await_count == 1
     assert redis.setnx.await_count == 1
     assert redis.delete.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_monitor_does_not_retry_backfill_from_evaluation(monkeypatch):
+    monitor = StockMonitor()
+    db = AsyncMock()
+    ws = SimpleNamespace(symbol="AAPL", added_at=None, watchlist_source_id=None)
+
+    insufficient = {
+        "signals": [],
+        "top_strategy": None,
+        "top_confidence": 0.0,
+        "evaluated_strategy_scores": {},
+        "evaluated_strategies": {},
+        "rejected_strategies": {
+            "opening_range_breakout": "insufficient_candles",
+            "pullback_reclaim": "insufficient_candles",
+        },
+        "feature_scores": {},
+    }
+    evaluate_all_mock = MagicMock(return_value=insufficient)
+    monkeypatch.setattr("app.stocks.monitoring.evaluate_all", evaluate_all_mock)
+    monkeypatch.setattr(monitor._store, "latest_close_ts", lambda *args, **kwargs: 100.0)
+    monkeypatch.setattr(monitor._store, "frame_info", lambda *args, **kwargs: {})
+    monkeypatch.setattr(monitor._store, "get", lambda *args, **kwargs: [])
+    monkeypatch.setattr("app.stocks.monitoring.is_watchlist_activation_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr("app.stocks.monitoring.get_redis", AsyncMock(return_value=SimpleNamespace(exists=AsyncMock(return_value=False))))
+    monkeypatch.setattr(monitor, "_has_open_position", AsyncMock(return_value=False))
+    monkeypatch.setattr(monitor, "_count_open_positions", AsyncMock(return_value=0))
+    monkeypatch.setattr("app.stocks.monitoring.regime_engine.can_open", lambda *args, **kwargs: (True, None))
+    monkeypatch.setattr("app.stocks.monitoring.can_enter_trade", lambda: False)
+
+    await monitor._evaluate_symbol(db, ws)
+
+    assert evaluate_all_mock.call_count == 1

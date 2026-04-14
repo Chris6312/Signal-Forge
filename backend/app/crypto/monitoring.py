@@ -13,21 +13,29 @@ from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
 from app.common.audit_logger import log_event
 from app.common.models.audit import AuditSource
 from app.common.runtime_state import runtime_state
+from app.common.market_hours import can_pull_data
 from app.common.redis_client import get_redis
 from app.common.ws_manager import ws_manager
-from app.crypto.kraken_client import kraken_client
-from app.crypto.strategies.entry_strategies import evaluate_all, _closed_ohlcv, _ema, _normalize_strategy_key
-from app.regime import regime_engine
-from app.regime.indicators import build_asset_indicators
 from app.common.candle_store import CandleStore, TF_MINUTES
-from app.crypto.candle_fetcher import CryptoCandleFetcher
+from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 from app.common.symbols import canonical_symbol
 from app.common.watchlist_activation import is_watchlist_activation_ready, activation_ready_at
+from app.crypto.candle_fetcher import CryptoCandleFetcher
+from app.crypto.strategies.entry_strategies import (
+    evaluate_all,
+    _closed_ohlcv,
+    _ema,
+    _normalize_strategy_key,
+)
+from app.regime import regime_engine
+from app.regime.indicators import build_asset_indicators
 
 logger = logging.getLogger(__name__)
 
 ASSET_CLASS = "crypto"
 COOLDOWN_KEY_PREFIX = "cooldown:crypto:"
+CRYPTO_CANDLE_STORE = CandleStore()
+CRYPTO_CANDLE_FETCHER = CryptoCandleFetcher(CRYPTO_CANDLE_STORE)
 
 
 def _extract_signals(result):
@@ -50,10 +58,22 @@ def _readiness_metrics(signal) -> dict:
     return dict(getattr(signal, "reasoning", {}) or {})
 
 
+def _crypto_candles_by_tf(store: CandleStore, symbol: str) -> dict[str, list]:
+    can = canonical_symbol(symbol, asset_class=ASSET_CLASS)
+    return {
+        "15m": store.get(can, TF_MINUTES["15m"]),
+        "1H": store.get(can, TF_MINUTES["1H"]),
+        "4H": store.get(can, TF_MINUTES["4H"]),
+        "daily": store.get(can, TF_MINUTES["daily"]),
+    }
+
+
 def _execution_readiness_adjustment(signal, candles_by_tf):
     reasoning = dict(getattr(signal, "reasoning", {}) or {})
     strategy_key = _signal_key(signal)
-    confidence_cap = float(reasoning.get("execution_confidence_cap") or getattr(signal, "confidence", 1.0) or 1.0)
+    confidence_cap = float(
+        reasoning.get("execution_confidence_cap") or getattr(signal, "confidence", 1.0) or 1.0
+    )
     ready = bool(reasoning.get("execution_ready", True))
     block_reason = reasoning.get("execution_block_reason")
 
@@ -87,7 +107,9 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
 
     if strategy_key == "breakout_retest":
         breakout_level = float(reasoning.get("prior_high_40") or reasoning.get("breakout_high_10") or ema20_now)
-        breakout_extension_pct = ((current - breakout_level) / max(breakout_level, 1e-6)) * 100.0 if breakout_level else 0.0
+        breakout_extension_pct = (
+            ((current - breakout_level) / max(breakout_level, 1e-6)) * 100.0 if breakout_level else 0.0
+        )
         acceptance_confirmed = bool(
             reasoning.get("breakout_acceptance_confirmed")
             if reasoning.get("breakout_acceptance_confirmed") is not None
@@ -130,6 +152,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
             confidence_cap = min(confidence_cap, 0.65)
         else:
             confidence_cap = min(confidence_cap, 0.72)
+
         return {
             "execution_ready": True,
             "confidence_cap": confidence_cap,
@@ -139,6 +162,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
     if strategy_key == "pullback_reclaim":
         true_reclaim = current > ema20_now and (ema9_now is None or current > ema9_now) and previous <= ema20_now
         support_extension_pct = ((current - ema20_now) / max(ema20_now, 1e-6)) * 100.0
+
         if not true_reclaim:
             return {
                 "execution_ready": False,
@@ -163,6 +187,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
                 "confidence_cap": min(confidence_cap, 0.62),
                 "block_reason": "reclaim_too_extended",
             }
+
         confidence_cap = min(confidence_cap, 0.72)
         return {
             "execution_ready": True,
@@ -175,6 +200,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
         recent_peak = max(closes[-5:]) if len(closes) >= 5 else max(closes)
         extension_loss = current <= previous and (recent_peak - current) / max(recent_peak, 1.0) >= 0.015
         failed_follow_through = support_lost and current <= previous
+
         if failed_follow_through or extension_loss:
             return {
                 "execution_ready": False,
@@ -199,6 +225,7 @@ def _execution_readiness_adjustment(signal, candles_by_tf):
             confidence_cap = min(confidence_cap, 0.80)
         else:
             confidence_cap = min(confidence_cap, 0.90)
+
         return {
             "execution_ready": True,
             "confidence_cap": confidence_cap,
@@ -229,9 +256,10 @@ def _select_top_signal(result):
 
 class CryptoMonitor:
     def __init__(self):
-        self._store = CandleStore()
-        self._fetcher = CryptoCandleFetcher(self._store)
+        self._store = CRYPTO_CANDLE_STORE
+        self._fetcher = CRYPTO_CANDLE_FETCHER
         self._last_trigger_eval_close_ts: dict[str, float] = {}
+        self._startup_backfill_pending = True
 
     async def run(self):
         await runtime_state.update_worker_status("crypto_monitor", "running")
@@ -239,14 +267,52 @@ class CryptoMonitor:
 
         while True:
             try:
+                if self._startup_backfill_pending and can_pull_data():
+                    await self._warm_start_backfill()
                 await self._cycle()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 logger.error("Crypto monitor error: %s", exc)
+
             await asyncio.sleep(settings.CRYPTO_MONITOR_INTERVAL)
 
         await runtime_state.update_worker_status("crypto_monitor", "stopped")
+
+    async def _warm_start_backfill(self):
+        logger.info("Crypto startup backfill starting")
+        async with AsyncSessionLocal() as db:
+            stmt = select(WatchlistSymbol).where(
+                WatchlistSymbol.asset_class == ASSET_CLASS,
+                WatchlistSymbol.state == SymbolState.ACTIVE,
+            )
+            result = await db.execute(stmt)
+            symbols = result.scalars().all()
+
+        if not symbols:
+            self._startup_backfill_pending = False
+            logger.info("Crypto startup backfill skipped: no active watchlist symbols")
+            return
+
+        for ws in symbols:
+            can = canonical_symbol(ws.symbol, asset_class=ASSET_CLASS)
+            if not all(
+                self._store.is_loaded(can, iv)
+                for iv in (TF_MINUTES["15m"], TF_MINUTES["1H"], TF_MINUTES["4H"], TF_MINUTES["daily"])
+            ):
+                await self._fetcher.backfill(ws.symbol)
+
+        self._startup_backfill_pending = not all(
+            all(
+                self._store.is_loaded(canonical_symbol(ws.symbol, asset_class=ASSET_CLASS), iv)
+                for iv in (TF_MINUTES["15m"], TF_MINUTES["1H"], TF_MINUTES["4H"], TF_MINUTES["daily"])
+            )
+            for ws in symbols
+        )
+        logger.info(
+            "Crypto startup backfill complete%s",
+            "" if not self._startup_backfill_pending else " (more data still pending)",
+        )
 
     async def _cycle(self):
         if not await runtime_state.is_trading_enabled(ASSET_CLASS):
@@ -262,16 +328,6 @@ class CryptoMonitor:
             result = await db.execute(stmt)
             symbols = result.scalars().all()
 
-            # Backfill any symbol not yet loaded into the candle store
-            for ws in symbols:
-                if not self._store.is_loaded(canonical_symbol(ws.symbol, asset_class=ASSET_CLASS), TF_MINUTES["1H"]):
-                    logger.info("Backfilling candles for %s", ws.symbol)
-                    await self._fetcher.backfill(ws.symbol)
-
-            # Refresh timeframes whose candle has just closed (20 s gate)
-            for ws in symbols:
-                await self._fetcher.refresh_if_needed(ws.symbol)
-
             for ws in symbols:
                 try:
                     await self._evaluate_symbol(db, ws)
@@ -281,17 +337,7 @@ class CryptoMonitor:
             await db.commit()
 
     async def _refresh_regime(self):
-        try:
-            btc_ohlcv = await kraken_client.get_ohlcv("BTC/USD", interval=1440)
-            eth_ohlcv = await kraken_client.get_ohlcv("ETH/USD", interval=1440)
-            if len(btc_ohlcv) >= 55 and len(eth_ohlcv) >= 55:
-                btc_closes = [float(c[4]) for c in btc_ohlcv]
-                eth_closes = [float(c[4]) for c in eth_ohlcv]
-                btc_ind = build_asset_indicators(btc_closes)
-                eth_ind = build_asset_indicators(eth_closes, btc_closes=btc_closes)
-                regime_engine.update_crypto(btc_ind, eth_ind)
-        except Exception as exc:
-            logger.warning("Regime refresh failed: %s", exc)
+        logger.debug("Crypto regime refresh skipped; candle workers own OHLCV ingestion")
 
     def _trigger_close_ts(self, symbol: str) -> float:
         return self._store.latest_close_ts(symbol, TF_MINUTES["15m"])
@@ -309,6 +355,7 @@ class CryptoMonitor:
 
     async def _evaluate_symbol(self, db, ws: WatchlistSymbol):
         can = canonical_symbol(ws.symbol, asset_class=ASSET_CLASS)
+
         already_open = await self._has_open_position(db, can)
         if already_open:
             return
@@ -317,7 +364,11 @@ class CryptoMonitor:
         if not self._should_evaluate_trigger(can):
             return
 
-        if not is_watchlist_activation_ready(ws.added_at, fast_tf_minutes=TF_MINUTES["15m"], frame_info=fast_frame_info):
+        if not is_watchlist_activation_ready(
+            ws.added_at,
+            fast_tf_minutes=TF_MINUTES["15m"],
+            frame_info=fast_frame_info,
+        ):
             logger.debug(
                 "%s added at %s is waiting for next 15m activation candle (ready at %s)",
                 can,
@@ -326,7 +377,6 @@ class CryptoMonitor:
             )
             return
 
-        # Prevent duplicate entry intents across concurrent monitor loops
         intent_key = f"intent:crypto:{can}"
         try:
             redis = await get_redis()
@@ -334,7 +384,6 @@ class CryptoMonitor:
             if not locked:
                 logger.debug("Entry intent already in progress for %s — skipping", can)
                 return
-            # Set a short TTL to avoid stale locks
             await redis.expire(intent_key, 60)
         except Exception as exc:
             logger.warning("Redis lock failed for %s: %s", can, exc)
@@ -349,18 +398,12 @@ class CryptoMonitor:
 
         self._mark_trigger_evaluated(can)
 
-        candles_by_tf = {
-            "15m":   self._store.get(can, TF_MINUTES["15m"]),
-            "1H":    self._store.get(can, TF_MINUTES["1H"]),
-            "4H":    self._store.get(can, TF_MINUTES["4H"]),
-            "daily": self._store.get(can, TF_MINUTES["daily"]),
-        }
+        candles_by_tf = _crypto_candles_by_tf(self._store, can)
 
         eval_result = evaluate_all(can, candles_by_tf, include_diagnostics=True)
         signals = _extract_signals(eval_result)
         if not signals:
             try:
-                # release intent if no signal
                 redis = await get_redis()
                 await redis.delete(intent_key)
             except Exception:
@@ -369,6 +412,11 @@ class CryptoMonitor:
 
         best = _select_top_signal(eval_result)
         if not best:
+            try:
+                redis = await get_redis()
+                await redis.delete(intent_key)
+            except Exception:
+                pass
             return
 
         readiness = _execution_readiness_adjustment(best, candles_by_tf)
@@ -380,6 +428,7 @@ class CryptoMonitor:
             readiness,
             _readiness_metrics(best),
         )
+
         if hasattr(best, "reasoning"):
             best.reasoning = dict(getattr(best, "reasoning", {}) or {})
             best.reasoning["execution_ready"] = readiness["execution_ready"]
@@ -392,6 +441,11 @@ class CryptoMonitor:
                 can,
                 readiness["block_reason"],
             )
+            try:
+                redis = await get_redis()
+                await redis.delete(intent_key)
+            except Exception:
+                pass
             return
 
         if readiness["confidence_cap"] < best.confidence:
@@ -399,23 +453,37 @@ class CryptoMonitor:
 
         logger.info(
             "Entry signal for %s: %s (confidence=%.2f)",
-            can, best.strategy, best.confidence
+            can,
+            best.strategy,
+            best.confidence,
         )
 
         current_count = await self._count_open_positions(db)
-        # Respect runtime overrides for max positions when evaluating regime limits
         try:
             max_override = await runtime_state.get_value("max_crypto_positions")
             if isinstance(max_override, str):
                 max_override = int(max_override)
         except Exception:
             max_override = None
-        allowed, reason = regime_engine.can_open(ASSET_CLASS, best.strategy, best.confidence, current_count, max_positions_override=max_override)
+
+        allowed, reason = regime_engine.can_open(
+            ASSET_CLASS,
+            best.strategy,
+            best.confidence,
+            current_count,
+            max_positions_override=max_override,
+        )
         if not allowed:
             logger.info("Entry blocked by regime [%s]: %s", regime_engine.crypto_regime, reason)
+            try:
+                redis = await get_redis()
+                await redis.delete(intent_key)
+            except Exception:
+                pass
             return
 
         await self._create_position(db, ws, best, can)
+
         try:
             redis = await get_redis()
             await redis.delete(intent_key)
@@ -424,7 +492,6 @@ class CryptoMonitor:
 
     async def _create_position(self, db, ws: WatchlistSymbol, signal, canonical: str):
         from app.common.paper_ledger import size_paper_position, record_paper_fill
-        from app.common.position_sizer import POSITION_SIZER_RETURNED_ZERO
 
         trading_mode = await runtime_state.get_trading_mode()
         risk_pct = await runtime_state.get_risk_per_trade_pct(ASSET_CLASS)
@@ -433,7 +500,12 @@ class CryptoMonitor:
         quantity = 0.0
         if is_paper:
             quantity = await size_paper_position(
-                db, ASSET_CLASS, signal.entry_price, signal.initial_stop, risk_pct, signal=signal
+                db,
+                ASSET_CLASS,
+                signal.entry_price,
+                signal.initial_stop,
+                risk_pct,
+                signal=signal,
             )
 
         if quantity <= 0:
@@ -503,7 +575,13 @@ class CryptoMonitor:
 
         if is_paper and quantity > 0:
             await record_paper_fill(
-                db, ASSET_CLASS, canonical, position.id, order.id, quantity, signal.entry_price
+                db,
+                ASSET_CLASS,
+                canonical,
+                position.id,
+                order.id,
+                quantity,
+                signal.entry_price,
             )
 
         await log_event(
@@ -528,13 +606,18 @@ class CryptoMonitor:
             },
         )
 
-        ws_manager.broadcast_from_thread("position_executed", {
-            "symbol": canonical,
-            "side": "BUY",
-            "quantity": float(quantity),
-            "price": signal.entry_price,
-            "asset_class": ASSET_CLASS,
-        })
+        ws_manager.broadcast_from_thread(
+            "position_executed",
+            {
+                "symbol": canonical,
+                "side": "BUY",
+                "quantity": float(quantity),
+                "price": signal.entry_price,
+                "asset_class": ASSET_CLASS,
+            },
+        )
+
+        return position
 
     def _select_exit_strategy(self, signal) -> str:
         if signal.regime == "trending_up":
@@ -544,11 +627,15 @@ class CryptoMonitor:
         return "Fixed Risk then Dynamic Protective Floor"
 
     async def _has_open_position(self, db, symbol: str) -> bool:
-        stmt = select(Position.id).where(
-            Position.symbol == symbol,
-            Position.asset_class == ASSET_CLASS,
-            Position.state == PositionState.OPEN,
-        ).limit(1)
+        stmt = (
+            select(Position.id)
+            .where(
+                Position.symbol == symbol,
+                Position.asset_class == ASSET_CLASS,
+                Position.state == PositionState.OPEN,
+            )
+            .limit(1)
+        )
         result = await db.execute(stmt)
         return result.first() is not None
 

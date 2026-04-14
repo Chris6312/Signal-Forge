@@ -14,6 +14,7 @@ from app.common.redis_client import get_redis
 from app.common.watchlist_engine import watchlist_engine
 from app.common.models.order import Order, OrderType, OrderSide, OrderStatus
 from app.crypto.kraken_client import kraken_client
+from app.crypto.monitoring import CRYPTO_CANDLE_STORE, _crypto_candles_by_tf
 from app.crypto.strategies.exit_strategies import evaluate_exit
 from app.crypto.ledger import crypto_ledger
 from app.common.paper_ledger import KRAKEN_TAKER_FEE_RATE

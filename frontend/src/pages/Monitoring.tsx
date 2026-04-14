@@ -134,6 +134,28 @@ function inferStrategyKey(strategyLabel: string): string {
   return STRATEGY_LABEL_TO_KEY[strategyLabel] ?? strategyLabel.toLowerCase().replace(/ /g, '_')
 }
 
+function hasText(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function resolveCandidateStrategy(row: Candidate): string {
+  if (hasText(row.top_strategy)) return row.top_strategy.trim()
+  if (hasText(row.evaluation?.top_strategy)) return row.evaluation!.top_strategy!.trim()
+  return 'Evaluating'
+}
+
+function resolveCandidateConfidence(row: Candidate): number {
+  const topConfidence = row.top_confidence
+  if (typeof topConfidence === 'number' && Number.isFinite(topConfidence) && topConfidence > 0) return topConfidence
+
+  const evaluationConfidence = row.evaluation?.confidence
+  if (typeof evaluationConfidence === 'number' && Number.isFinite(evaluationConfidence) && evaluationConfidence > 0) {
+    return evaluationConfidence
+  }
+
+  return 0
+}
+
 function resolveSelectedStrategyKey(result: EvalResult | null): string | null {
   if (!result) return null
 
@@ -252,14 +274,14 @@ export default function Monitoring() {
     for (const row of rows) {
       const key = row.symbol?.toUpperCase() ?? ''
       const current = bestBySymbol.get(key)
+      const nextConfidence = resolveCandidateConfidence(row)
 
       if (!current) {
         bestBySymbol.set(key, row)
         continue
       }
 
-      const currentConfidence = current.top_confidence ?? Number.NEGATIVE_INFINITY
-      const nextConfidence = row.top_confidence ?? Number.NEGATIVE_INFINITY
+      const currentConfidence = resolveCandidateConfidence(current)
 
       if (nextConfidence > currentConfidence) {
         bestBySymbol.set(key, row)
@@ -353,7 +375,7 @@ export default function Monitoring() {
       header: 'PRIMARY_ALGO',
       cell: (info: any) => {
         const row = info.row.original as Candidate
-        const val = info.getValue() ?? row.evaluation?.top_strategy ?? 'Evaluating'
+        const val = resolveCandidateStrategy(row)
         return (
           <span className="text-xs font-mono font-medium text-gray-300 uppercase tracking-wider bg-surface-card border border-surface-border px-2 py-0.5 rounded">
             {val}
@@ -365,7 +387,7 @@ export default function Monitoring() {
       header: 'CONFIDENCE',
       cell: (info: any) => {
         const row = info.row.original as Candidate
-        const val = info.getValue() ?? row.evaluation?.confidence ?? 0
+        const val = resolveCandidateConfidence(row)
         return (
           <span
             className={clsx(
